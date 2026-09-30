@@ -24,6 +24,9 @@ El propósito de este trabajo es realizar un análisis exploratorio de datos, y 
 * Mora Gutiérrez Karla Fernanda
 * Sánchez Aguirre Luz Lorena
 
+### Nota IMPORTANTE: 
+Para la obtención de la información se utilizó una base de datos mediante una API. Es importante señalar que el proceso de consulta y carga de los datos puede tomar un tiempo considerable, alrededor de 20 mins, debido a que la información debe ser solicitada y recuperada directamente desde la API. A pesar de este tiempo de espera, el uso de la API permite acceder a información actualizada y estructurada para posteriormente realizar el análisis correspondiente.
+
 
 
 
