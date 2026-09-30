@@ -1,5 +1,8 @@
 # THE MOVIE DATABASE — TMDB API 
 ### UNIVERSIDAD NACIONAL AUTÓNOMA DE MÉXICO
-#### FACULTAD DE CIENCIAS
+Introducción Analítica a la Ciencia de Datos
+Módulo 8. Comunicación de Resultados
+Equipo 4
+
 
 
