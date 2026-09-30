@@ -1,0 +1,5681 @@
+---
+title: "PELÍCULAS"
+author: "Equipo 4"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme: flatly
+    source_code: embed
+    css: styles_unam.css
+---
+```{r Librerias, message=FALSE, warning=FALSE}
+library(tidyverse) 
+library(scales) 
+library(knitr) 
+library(httr) 
+library(jsonlite) 
+library(gridExtra) 
+library(ggplot2)
+library(corrplot)
+library(dplyr) 
+library(tidyr) 
+library(randomForest) 
+library(purrr) 
+library(flexdashboard) 
+library(DT) 
+library(plotly) 
+library(crosstalk) 
+library(htmltools)
+
+```
+
+<!--
+  Introducción
+El conjunto de datos de TMDB (The Movie Database) reúne información sobre películas de distintos géneros, años y países a nivel global, incluyendo atributos como género, fecha de estreno, presupuesto, calificaciones del público e ingresos generados. Este conjunto de datos permite explorar y analizar los factores relacionados con el desempeño comercial de las películas. A partir de esta información, se busca identificar patrones y relaciones que ayuden a comprender qué características se encuentran asociadas con mayores ingresos de taquilla.
+
+  Objetivo
+Analizar las características de las películas incluidas en la muestra de TMDB con el propósito de identificar los factores que presentan una mayor relación con sus ingresos de taquilla y en su rentabilidad respecto al presupuesto. Con esto, generar información que posteriormente pueda utilizarse para construir un modelo predictivo de desempeño comercial.
+
+  Pregunta de investigación
+¿Qué características de una película están asociadas con mayores ingresos de taquilla?
+
+  Preguntas secundarias
+¿Existe una relación entre el presupuesto de una película y los ingresos que genera?
+¿Las películas con mejores calificaciones del público tienden a generar mayores ingresos?
+-->
+
+<!--
+        D E S C A R G A ,   E X P L O R A C I Ó N   Y   L I M P I E Z A   
+-->
+
+```{r Dataset, include=FALSE}
+# Descarga de dataset IDs desde la API
+
+API_KEY <- "1abfdfc8a435766ceb3e3835fd5317b9"
+
+# Función para obtener las consultas a la API
+obtener_pagina <- function(pagina) {
+  
+  url <- "https://api.themoviedb.org/3/discover/movie"
+  
+  # Consulta a la API
+  respuesta <- GET(url, 
+                   query = list(api_key = API_KEY,
+                                language = "es-ES",
+                                sort_by = "popularity.desc",
+                                page = pagina))
+  # Consulta exitosa
+  if (status_code(respuesta) == 200) {
+    texto <- content(respuesta, as = "text", encoding = "UTF-8")
+    datos <- fromJSON(texto, flatten = TRUE)
+    return(as_tibble(datos$results))
+    
+  } else { return(NULL)}
+}
+
+
+# Se generan los números de página del 1 al 500
+# TMDB devuelve aproximadamente 20 películas por página
+
+paginas <- 1:500
+df_10k <- map_dfr(paginas, obtener_pagina)
+
+# Cada película tiene un identificador único en TMDB
+# Estos IDs se utilizarán posteriormente para solicitar información más detallada de cada película.
+
+lista_ids <- unique(df_10k$id)
+
+### Número total de IDs
+cat("Número de IDs obtenidos:", length(lista_ids), "\n")
+
+total_ids <- format(length(lista_ids), big.mark = ",")
+
+# Descarga de dataset detallada desde la API
+# Función para obtener la información detallada
+obtener_detalle <- function(movie_id) {
+  
+  url <- paste0("https://api.themoviedb.org/3/movie/",movie_id)
+  
+  # Consulta a la API
+  respuesta <- GET(url, query = list(api_key = API_KEY,
+                                     language = "es-ES",
+                                     append_to_response = "credits,keywords"))
+  #Consulta exitosa                                
+  if (status_code(respuesta) == 200) {
+    texto <- content(respuesta, as = "text", encoding = "UTF-8")
+    datos <- fromJSON(texto, flatten = TRUE)
+
+    # DIRECTOR
+    crew <- datos$credits$crew
+    director <- NA_character_
+    
+    if (
+      is.data.frame(crew) && 
+      nrow(crew) > 0 && 
+      "job" %in% names(crew) && 
+      "name" %in% names(crew)) {
+      pos_director <- which(!is.na(crew$job) & crew$job == "Director")
+      
+      if (length(pos_director) > 0) {director <- crew$name[pos_director[1]]}}
+    
+    # TOP 3 ACTORES
+    cast <- datos$credits$cast
+    
+    if (
+      is.data.frame(cast) && 
+      nrow(cast) > 0 && 
+      "name" %in% names(cast)) {
+      actores <- head(cast$name[!is.na(cast$name)], 3)
+    } else { actores <- character(0)}
+    
+    # GÉNEROS
+     if (
+       is.data.frame(datos$genres) && 
+       nrow(datos$genres) > 0 &&
+       "name" %in% names(datos$genres)) {
+      generos <- datos$genres$name
+     } else {generos <- character(0)}
+    
+    # PRODUCTORAS
+    if (
+      is.data.frame(datos$production_companies) && 
+      nrow(datos$production_companies) > 0 &&
+        "name" %in% names(datos$production_companies)) {
+      productoras <- datos$production_companies$name
+    } else {productoras <- character(0)}
+
+    # PAÍSES DE PRODUCCIÓN
+    if (
+      is.data.frame(datos$production_countries) && 
+      nrow(datos$production_countries) > 0 &&
+        "iso_3166_1" %in% names(datos$production_countries)) {
+      paises <- datos$production_countries$iso_3166_1
+    } else {paises <- character(0)}
+
+    # FRANQUICIA
+    franquicia <- ifelse(
+      is.null(datos$belongs_to_collection) || length(datos$belongs_to_collection) == 0, 0, 1)
+    
+    # PALABRAS CLAVE
+    keywords <- datos$keywords$keywords
+    
+    palabras_clave <- if (
+                          is.data.frame(keywords) && 
+                          nrow(keywords) > 0 && 
+                          "name" %in% names(keywords)) {palabras_clave <- head(keywords$name[!is.na(keywords$name)], 3)
+                          } else {palabras_clave <- character(0)}
+
+   tibble(id = datos$id,
+          titulo = datos$title,
+          popularidad = datos$popularity,
+          presupuesto = datos$budget,
+          ingresos = datos$revenue,
+          tiempo_duracion = datos$runtime,
+          calif_promedio = datos$vote_average,
+          num_votos = datos$vote_count,
+          franquicia = franquicia,
+          fecha_estreno = datos$release_date,
+          lenguaje = datos$original_language,
+          generos = paste(generos, collapse = ", "),
+          director = director,
+          top_actores = paste(actores, collapse = ", "),
+          productoras = paste(productoras, collapse = ", "),
+          paises_productoras = paste(paises, collapse = ", "),
+          palabras_clave = paste(palabras_clave,collapse = ", "))
+        
+  } else {return(NULL)}}
+
+# Consulta para todos los IDs
+df_peliculas <- map_dfr(lista_ids, obtener_detalle)
+```
+
+<!--
+  AJUSTE DE TIPOS DE VARIABLES
+
+Antes de realizar el análisis exploratorio, se revisan y ajustan los tipos de datos de aquellas variables que requieren. En particular, la fecha de estreno se transforma a formato fecha y la variable franquicia se convierte en una variable categórica, ya que representa si una película pertenece o no a una franquicia.
+-->
+
+```{r, include=FALSE}
+# Ajuste de tipos de variables
+df_peliculas <- df_peliculas %>%
+  mutate(fecha_estreno = as.Date(fecha_estreno),
+    
+    # Convertir franquicia a variable categórica
+    franquicia = factor(franquicia, levels = c(0, 1), labels = c("No", "Sí")))
+```
+
+<!--
+  ERRORES E INCONSISTENCIAS
+
+Como parte de la evaluación de la calidad de los datos, se revisan posibles inconsistencias en las variables principales de la base. En particular, se identifican películas con fechas de estreno posteriores a la fecha de corte del análisis, así como valores iguales a cero o fuera de rangos razonables en variables numéricas.
+-->
+
+```{r, include=FALSE}
+# Fecha de corte del análisis
+fecha_corte <- as.Date("2026-09-20")
+
+# FECHAS DE ESTRENO
+cat("Películas con fecha de estreno posterior a septiembre de 2026:",
+    sum(df_peliculas$fecha_estreno > as.Date("2026-09-30"), na.rm = TRUE), "\n")
+
+# Rango de fechas encontrado en la base
+cat("Fecha mínima:", as.character(min(df_peliculas$fecha_estreno, na.rm = TRUE)), "\n")
+cat("Fecha máxima:", as.character(max(df_peliculas$fecha_estreno, na.rm = TRUE)), "\n\n")
+
+# PRESUPUESTO
+cat("Presupuesto igual a 0:", sum(df_peliculas$presupuesto == 0, na.rm = TRUE), "\n")
+
+# INGRESOS
+cat("Ingresos iguales a 0:", sum(df_peliculas$ingresos == 0, na.rm = TRUE), "\n")
+
+# DURACIÓN
+cat("Duración igual a 0:",sum(df_peliculas$tiempo_duracion == 0, na.rm = TRUE), "\n")
+ 
+# NÚMERO DE VOTOS
+cat("Películas con 0 votos:", sum(df_peliculas$num_votos == 0, na.rm = TRUE), "\n")
+```
+
+<!--
+  DEPURACIÓN DE REGISTROS
+  
+La depuración de la base se realiza con el objetivo de conservar únicamente observaciones que cuenten con información suficiente y congruente para responder la pregunta de investigación.
+
+Se eliminan las películas con presupuesto o ingresos menores a 50 doláres debido a que ambas variables son fundamentales para el análisis. En particular, los ingresos corresponden a la variable objetivo, mientras que el presupuesto constituye una de las principales variables explicativas. Mantener registros sin información válida en estas variables podría afectar la interpretación de las relaciones y el desempeño del modelo predictivo.
+
+Asimismo, se excluyen las películas sin fecha de estreno válida o con fecha posterior a septiembre de 2026, ya que se encuentran fuera del periodo definido para el estudio o no permiten determinar correctamente su temporalidad. También se eliminan los registros con duración igual a cero o sin votos, debido a que estos valores no aportan información suficiente para analizar características relacionadas con la recepción y desempeño de las películas.
+
+Se opta por excluir estas observaciones en lugar de imputar sus valores, ya que no existe información suficiente para estimarlos de manera confiable sin introducir supuestos adicionales que puedan sesgar los resultados. Después de aplicar estos criterios, la base de análisis queda conformada por 5,733 películas.
+-->
+
+```{r, include=FALSE}
+# Depuración de la base de análisis
+df_analisis <- df_peliculas %>%
+  filter(!is.na(fecha_estreno),
+          fecha_estreno <= as.Date("2026-09-30"),
+          presupuesto > 50,
+          ingresos > 50,
+          tiempo_duracion > 0,
+          num_votos > 0)
+
+# Comparación antes y después de la depuración
+cat("Registros iniciales:", nrow(df_peliculas), "\n")
+cat("Registros finales:", nrow(df_analisis), "\n")
+cat("Registros eliminados:", nrow(df_peliculas) - nrow(df_analisis), "\n")
+
+# Columna de retorno de inversión (ROI)
+df_analisis$roi <- round(df_analisis$ingresos / df_analisis$presupuesto, 1)
+
+if ("anio" %in% colnames(df_analisis)) {
+  df_analisis$decada <- as.integer(df_analisis$anio %/% 10 * 10)
+}
+```
+
+<!--
+Agregamos una columna nueva sacando el retorno de inversión (ROI por sus siglas en inglés) de todas las películas, en este análisis usaremos esta métrica como un indicador clave de éxito para una producción, si el ROI de una película es mayor a 1 significa que todo lo invertido fue recuperado y no hubieron pérdidas, sin embargo, diversas fuentes considera que para que una película sea rentable, tiene que superar 2.5 veces su inversión, lo cual tomaremos como base en este estudio.
+-->
+
+```{r, echo=FALSE}
+write.csv(df_analisis, "peliculas.csv", row.names = FALSE)
+```
+
+<!--
+                      C A L I D A D   D E   D A T O S
+                      
+Una vez depurada la base de los errores e inconsitencia de los datos, se evalúa la calidad de la información disponible. 
+
+En esta etapa se revisa la presencia de valores faltantes, campos de texto vacíos y posibles registros duplicados.
+-->
+
+```{r, echo=FALSE}
+#Valores NA
+na_por_variable <- tibble(
+  variable = names(df_analisis),
+  cantidad_na = colSums(is.na(df_analisis)),
+  porcentaje_na = round(colSums(is.na(df_analisis)) / nrow(df_analisis) * 100,2)) %>%
+  arrange(desc(cantidad_na))
+
+```
+
+```{r, echo=FALSE}
+# Campos de texto vacío
+variables_texto <- df_analisis %>%
+  select(where(is.character))
+
+vacios_por_variable <- tibble(
+  variable = names(variables_texto),
+  cantidad_vacios = sapply(variables_texto,
+    function(x) sum(trimws(x) == "", na.rm = TRUE))) %>%
+  arrange(desc(cantidad_vacios))
+
+```
+
+```{r, include=FALSE}
+#Registros duplicados 
+cat("Número de filas completamente duplicadas:", sum(duplicated(df_analisis)), "\n")
+cat("Número de IDs duplicados:", sum(duplicated(df_analisis$id)), "\n")
+
+cat("Número de películas únicas:", n_distinct(df_analisis$id), "\n")
+cat("Número total de registros:", nrow(df_analisis))
+
+duplicados_filas <- sum(duplicated(df_analisis)) 
+duplicados_ids <- sum(duplicated(df_analisis$id)) 
+```
+
+<!--
+  TRATAMIENTO FINAL DE VALORES FALTANTES
+
+Después de aplicar los criterios de depuración, la base presenta una cantidad mínima de información faltante. Únicamente se identificaron algunos campos vacíos en las variables palabras_clave y top_actores.
+
+Debido a que estas variables no son indispensables para definir la variable objetivo ni para conservar la información financiera de las películas, se mantienen las observaciones correspondientes. Los campos vacíos se transforman a NA con el objetivo de representar de manera uniforme la ausencia de información.
+-->
+
+```{r, include=FALSE}
+# Homologar campos vacíos como NA
+df_analisis <- df_analisis %>%
+  mutate(across(where(is.character), ~na_if(trimws(.), "")))
+
+# Verificar valores faltantes después del ajuste
+faltantes_final <- tibble(
+  variable = names(df_analisis),
+  cantidad_na = colSums(is.na(df_analisis)),
+  porcentaje_na = round(colSums(is.na(df_analisis)) / nrow(df_analisis) * 100, 2)
+) %>%
+  arrange(desc(cantidad_na))
+```
+
+<!--
+  REVISIÓN DE VALORES ATÍPICOS
+  
+Como parte de la evaluación de la calidad de los datos, se analizan posibles valores atípicos en las principales variables numéricas de la base. Para identificarlos se utiliza el criterio del rango intercuartílico (IQR), considerando como potencialmente atípicos aquellos valores inferiores a 1.5 veces el IQR por debajo del primer cuartil o superiores a 1.5 veces el IQR por encima del tercer cuartil.
+
+Por la naturaleza de la industria cinematográfica, algunas películas pueden presentar presupuestos, ingresos, niveles de popularidad o número de votos considerablemente superiores al resto y aun así representar observaciones reales.
+-->
+```{r, include=FALSE}
+# Variables numéricas a evaluar
+variables_atipicos <- c("popularidad", "presupuesto", "ingresos",
+                        "tiempo_duracion", "calif_promedio", "num_votos","roi")
+
+# Valores atípicos
+analizar_atipicos <- function(variable) {
+  
+  x <- df_analisis[[variable]]
+  
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_variable <- IQR(x, na.rm = TRUE)
+  
+  limite_inferior <- Q1 - 1.5 * IQR_variable
+  limite_superior <- Q3 + 1.5 * IQR_variable
+  
+  cantidad_atipicos <- sum(x < limite_inferior | x > limite_superior, na.rm = TRUE)
+  
+  tibble(
+    variable = variable,
+    Q1 = Q1,
+    Q3 = Q3,
+    IQR = IQR_variable,
+    limite_inferior = limite_inferior,
+    limite_superior = limite_superior,
+    cantidad_atipicos = cantidad_atipicos,
+    porcentaje_atipicos = round(cantidad_atipicos / sum(!is.na(x)) * 100, 2))
+}
+
+tabla_atipicos <- map_dfr(variables_atipicos,analizar_atipicos)
+
+total_atipicos1 <- sum(tabla_atipicos$cantidad_atipicos)
+```
+
+```{r, include=FALSE}
+# Valores mínimos y máximos observados
+resumen_extremos <- map_dfr(variables_atipicos, function(variable) {
+  x <- df_analisis[[variable]]
+  
+  tibble(
+    variable = variable,
+    minimo = comma(min(x, na.rm = TRUE), accuracy = 0.01),
+    maximo = comma(max(x, na.rm = TRUE), accuracy = 0.01)
+    )
+  }
+)
+```
+
+<!--
+Los valores mínimos y máximos observados resultan posibles para el contexto de la industria cinematográfica. El presupuesto de las películas se encuentra entre 2,000 dolares y 658.8 millones de doláres, mientras que los ingresos van de 881 dolares a aproximadamente 2,923.7 millones de dolares. La duración oscila entre 13 y 275 minutos, la calificación promedio entre 2.936 y 8.905,el número de votos entre 5 y 41,197 y el roi va de 0 a 12,890, lo que significa que una de las películas hizo 12 mil veces lo que costó hacerla y se puede ver en el boxploto lo alejado que esta de la media de esta variable.
+
+Aunque el método del rango intercuartílico identifica observaciones atípicas en varias de estas variables, los valores extremos revisados no presentan inconsistencias evidentes y pueden corresponder a películas reales con características excepcionalmente altas o bajas respecto al resto de la muestra.
+
+Por esta razón, se decide conservar los valores atípicos en la base de análisis, ya que su eliminación podría excluir películas con comportamientos reales y relevantes para estudiar las diferencias en el desempeño comercial.
+-->
+
+<!--
+                          V I S U A L I Z A C I Ó N
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 4.5,
+  cache = TRUE
+)
+
+# ------------------------------------------------------------------
+# PALETA INSTITUCIONAL UNAM (dorado y azul)
+# ------------------------------------------------------------------
+azul_unam      <- "#00366D"
+azul_oscuro    <- "#001B3E"
+azul_claro     <- "#5B8FF9"
+dorado_unam    <- "#C69A2F"
+dorado_claro   <- "#E8C873"
+gris_texto     <- "#2B2B2B"
+
+paleta_unam <- c(azul_unam, dorado_unam, azul_claro, dorado_claro, azul_oscuro)
+
+tema_unam <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.title = element_text(face = "bold", color = azul_oscuro, hjust = 0.5, size = base_size + 8),
+      plot.subtitle = element_text(color = "gray35", hjust = 0.5, size = base_size + 2),
+      axis.title = element_text(color = azul_oscuro, face = "bold"),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
+    )
+}
+
+df_analisis <- df_analisis %>% mutate(fecha_estreno = as.Date(fecha_estreno)) 
+
+if (!"roi" %in% names(df_analisis)) 
+  { df_analisis$roi <- round(df_analisis$ingresos / df_analisis$presupuesto, 1) } 
+
+variables_numericas <- c("popularidad", "presupuesto", "ingresos", "tiempo_duracion", "calif_promedio", "num_votos", "roi") 
+
+n_peliculas <- nrow(df_analisis) 
+rango_fechas <- range(df_analisis$fecha_estreno, na.rm = TRUE) 
+roi_prom <- mean(df_analisis$roi, na.rm = TRUE) 
+pct_rentables <- mean(df_analisis$roi > 2.5, na.rm = TRUE) 
+relacion_prom <- mean(df_analisis$roi,na.rm = TRUE) 
+pct_alto_retorno <- mean(df_analisis$roi > 2.5, na.rm = TRUE)
+```
+
+<!--
+      Introducción
+El conjunto de datos de TMDB (The Movie Database) reuné información sobre películas de distintos géneros, años y países a nivel global, incluyendo atributos como género, fecha de estreno, presupuesto, calificaciones del público e ingresos generados.
+
+Este conjunto de datos permite explorar y analizar los factores relacionados con el desempeño comercial de las películas. A partir de esta información, se busca identificar patrones y relaciones que ayuden a comprender qué características se encuentran asociadas con mayores ingresos de taquilla.
+
+El propósito de este trabajo es realizar un análisis exploratorio de datos (EDA) y, posteriormente, desarrollar un modelo predictivo que permita identificar los principales factores asociados con los ingresos obtenidos por las películas registradas en la muestra de TMDB.
+-->
+
+Inicio
+=====================================
+
+Row {data-height=250}
+-------------------------------------
+<div style=" 
+  width: 100%; 
+  height: 100%; 
+  box-sizing: border-box; 
+  background: linear-gradient( 
+    105deg, #001B3E 0%, #00366D 68%, #C69A2F 125% ); 
+  border-radius: 8px; 
+  padding: 32px 45px; 
+  color: white; 
+  display: flex; 
+  align-items: center; 
+  gap: 35px; 
+">
+
+  <img
+    src="images/escudo_unam.png"
+    alt="Escudo UNAM"
+    style="
+    height: 125px;
+    width: auto;
+    flex-shrink: 0;
+  ">
+  
+<div style="flex: 1;">
+
+<div style="
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+  opacity: 0.85;
+">
+  Análisis de datos cinematográficos
+</div>
+
+<div style="
+  font-size: 42px;
+  font-weight: 800;
+  line-height: 1.05;
+  margin-bottom: 12px;
+">
+  EL ÉXITO EN PANTALLA
+</div>
+
+<div style="
+  font-size: 23px;
+  font-weight: 400;
+  line-height: 1.3;
+  max-width: 850px;
+">
+  ¿Qué características de una película están asociadas 
+  con mayores ingresos de taquilla?
+</div>
+
+<div style="
+  margin-top: 18px;
+  font-size: 14px;
+  opacity: 0.85;
+">
+  Universidad Nacional Autónoma de México
+  
+</div>
+
+</div>
+
+<div style="
+    width: 300px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-shrink: 0;
+    opacity: 0.92;
+    margin-left: -25px;
+  ">
+
+  <img
+    src="images/CINTA2.png"
+    alt="Escudo UNAM"
+    style="
+      width: 300px;
+      height: auto;
+      transform: rotate(-8deg);
+      display: block;
+  ">
+
+</div>
+
+</div>
+
+
+Row {data-height=115}
+-------------------------------------
+
+### Películas analizadas
+```{r}
+valueBox(total_ids, caption = "Películas analizadas", icon = "fa-film", color = azul_unam)
+```
+
+### Periodo de estreno
+```{r}
+valueBox(
+  paste0(format(rango_fechas[1], "%Y"), " – ", format(rango_fechas[2], "%Y")),
+  caption = "Periodo de estreno",
+  icon = "fa-calendar",
+  color = dorado_unam
+)
+```
+
+### Películas rentables
+```{r}
+valueBox(percent(pct_alto_retorno, accuracy = 0.1), caption = "Películas con alto retorno", icon = "fa-chart-line", color = dorado_claro)
+```
+
+### Presupuesto
+
+```{r}
+valueBox(dollar(sum(df_analisis$presupuesto, na.rm = TRUE), scale = 1e-6, suffix = "M"),
+         icon = "fa-money-bill", color = "info")
+```
+Row {data-height=350}
+-------------------------------------
+
+### Objetivo del proyecto
+
+El éxito de una película no depende de una sola característica. Su desempeño puede estar relacionado con elementos financieros, la recepción del público y distintas características de producción y contenido.
+
+En este proyecto se analiza una muestra de películas de The Movie Database (TMDB) para explorar qué variables presentan mayor relación con sus ingresos de taquilla, rentabilidad y popularidad.
+
+<div style=" display: flex; justify-content: center; gap: 18px; margin: 20px 0 15px 0; flex-wrap: wrap; ">
+
+<div style=" flex: 1; min-width: 180px; padding: 16px; background: #F4F6F8; border-left: 4px solid #00366D; border-radius: 5px; "> <strong>💰 Desempeño financiero</strong><br> <span style="font-size: 13px;"> Presupuesto, ingresos y rentabilidad. </span> </div>
+
+<div style=" flex: 1; min-width: 180px; padding: 16px; background: #F4F6F8; border-left: 4px solid #C69A2F; border-radius: 5px; "> <strong>⭐ Recepción del público</strong><br> <span style="font-size: 13px;"> Calificaciones, votos y popularidad. </span> </div>
+
+<div style=" flex: 1; min-width: 180px; padding: 16px; background: #F4F6F8; border-left: 4px solid #5B8FF9; border-radius: 5px; "> <strong>🎬 Características de producción</strong><br> <span style="font-size: 13px;"> Género, duración, franquicia y otros atributos. </span> </div>
+
+</div>
+
+### ¿Qué encontrarás en este Dashboard?
+
+<div style="display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 15px;">
+  
+<div style="padding: 16px 20px;
+  border-radius: 6px;
+  background: #F4F6F8;">
+  
+<strong style="color: #00366D;">01 · Datos</strong><br>
+<span style="font-size: 13px;">
+Origen, estructura, variables y calidad de la información.
+</span>
+</div>
+
+<div style="padding: 16px 20px;
+  border-radius: 6px;
+  background: #F4F6F8;">
+<strong style="color: #00366D;">02 · Análisis Exploratorio</strong><br>
+<span style="font-size: 13px;">
+Distribuciones, perfiles de contenido, rankings y relaciones entre variables.
+</span>
+</div>
+
+<div style="padding: 16px 20px;
+  border-radius: 6px;
+  background: #F4F6F8;">
+<strong style="color: #00366D;">03 · Modelado Predictivo</strong><br>
+<span style="font-size: 13px;">
+Comparación de modelos, variables relevantes y evaluación del desempeño predictivo.
+</span>
+</div>
+
+<div style="padding: 16px 20px;
+  border-radius: 6px;
+  background: #F4F6F8;">
+<strong style="color: #00366D;">04 · Conclusiones</strong><br>
+<span style="font-size: 13px;">
+Principales hallazgos, limitaciones y referencias utilizadas en el proyecto.
+</span>
+</div>
+
+</div>
+
+**Hipótesis general.** Se plantea como hipótesis general que determinadas características financieras, de recepción del público y de producción de una película presentan una relación con los ingresos de taquilla obtenidos.
+
+Row 
+-------------------------------------
+### Información
+
+<div style="display:flex; 
+  gap:14px; 
+  flex-wrap:wrap; 
+  margin-top:10px;">
+
+<div style="flex:1; 
+  min-width:220px; 
+  padding:14px 16px; 
+  background:#F8FAFC; 
+  border-radius:10px; 
+  border-top:4px solid #C69A2F;">
+
+<div style="font-size:12px; 
+  color:#64748B; 
+  font-weight:600; 
+  text-transform:uppercase;">
+Variable objetivo
+</div>
+
+<div style="font-size:20px; 
+  font-weight:700; 
+  color:#001B3E; 
+  margin-top:4px;">
+Ingresos
+</div>
+
+<div style="font-size:12px; 
+  color:#475569; 
+  margin-top:5px;">
+Ingresos reportados para cada película en TMDB.
+</div>
+
+</div>
+
+
+<div style="flex:1; 
+  min-width:220px; 
+  padding:14px 16px; 
+  background:#F8FAFC; 
+  border-radius:10px; 
+  border-top:4px solid #00366D;">
+
+<div style="font-size:12px; 
+  color:#64748B; 
+  font-weight:600; 
+  text-transform:uppercase;">
+Variables explicativas
+</div>
+
+<div style="font-size:20px; 
+  font-weight:700; 
+  color:#001B3E; 
+  margin-top:4px;">
+14 variables
+</div>
+
+<div style="font-size:12px; 
+  color:#475569; 
+  margin-top:5px;">
+Presupuesto, popularidad, duración, calificación, votos, franquicia, fecha, lenguaje, género, director, actores, productoras, países y palabras clave.
+</div>
+
+</div>
+
+
+<div style="flex:1; 
+  min-width:220px; 
+  padding:14px 16px; 
+  background:#F8FAFC; 
+  border-radius:10px; 
+  border-top:4px solid #C69A2F;">
+
+<div style="font-size:12px; 
+  color:#64748B; 
+  font-weight:600; 
+  text-transform:uppercase;">
+Población de interés
+</div>
+
+<div style="font-size:20px; 
+  font-weight:700; 
+  color:#001B3E; 
+  margin-top:4px;">
+Películas de TMDB
+</div>
+
+<div style="font-size:12px; 
+  color:#475569; 
+  margin-top:5px;">
+Películas con información sobre características, recepción de usuarios y desempeño financiero.
+</div>
+
+</div>
+
+
+<div style="flex:1; 
+  min-width:220px; 
+  padding:14px 16px; 
+  background:#F8FAFC; 
+  border-radius:10px; 
+  border-top:4px solid #00366D;">
+
+<div style="font-size:12px; 
+  color:#64748B; 
+  font-weight:600; 
+  text-transform:uppercase;">
+Unidad de análisis
+</div>
+
+<div style="font-size:20px; 
+  font-weight:700; 
+  color:#001B3E; 
+  margin-top:4px;">
+Película individual
+</div>
+
+<div style="font-size:12px; 
+  color:#475569; 
+  margin-top:5px;">
+Cada película incluida en la base de datos constituye una unidad de análisis.
+</div>
+
+</div>
+
+</div>
+
+Row {data-height=100}
+-------------------------------------
+
+### Consideraciones metodológicas y limitaciones de la fuente
+
+La información proviene de la API pública de **The Movie Database (TMDB)**, a partir de una consulta de las `r total_ids` películas mejor posicionadas por popularidad. Tras aplicar los criterios de calidad descritos en la sección de Datos.
+
+* **Naturaleza dinámica:** Los datos representan una **fotografía estática** al momento de la extracción; TMDB actualiza su base constantemente por lo que las cifras pueden variar en consultas posteriores.
+* **Métrica de popularidad:** Es un indicador flotante y multifactorial (basado en interacciones, votos y visualizaciones recientes), por lo que no es una propiedad fija de la película.
+* **Muestreo no aleatorio:** Al seleccionar los títulos ordenados por popularidad, la muestra presenta un **sesgo de selección** y los hallazgos aplican exclusivamente al contexto de las películas de mayor impacto en la plataforma.
+* **Estabilidad del método:** No se identificaron cambios metodológicos recientes en la API, aunque sus métricas y endpoints están sujetos a actualizaciones continuas por parte del proveedor.
+
+
+Datos {data-navmenu="Dataset"}
+=====================================
+
+<!--
+SELECCIÓN Y OBTENCIÓN DE DATOS
+En esta primera etapa se realiza una consulta general a la API de TMDB con el objetivo de obtener 10,000 películas ordenadas de mayor a menor popularidad. A partir de esta consulta se recupera información básica de cada película, principalmente su identificador único (id).
+
+Estos identificadores serán utilizados posteriormente para realizar consultas individuales más detalladas a la API y obtener variables adicionales necesarias para el análisis, como presupuesto, ingresos, duración, géneros, director, actores, productoras y países de producción.
+-->
+
+Row
+-------------------------------------
+
+```{r, include=FALSE}
+### Información general
+
+n_final <- nrow(df_analisis)
+n_variables <- ncol(df_peliculas)
+n_inicial <- nrow(df_peliculas)
+
+### Registros Eliminados
+
+n_eliminados <- max(n_inicial - n_final, 0)
+na_total <- sum(is.na(df_analisis)) 
+
+
+### Fechas disponibles
+
+fecha_min <- NA
+fecha_max <- NA
+
+if ("fecha_estreno" %in% names(df_analisis)) {
+  
+  fechas <- suppressWarnings(as.Date(df_analisis$fecha_estreno))
+  
+  if (any(!is.na(fechas))) {
+    fecha_min <- min(fechas, na.rm = TRUE)
+    fecha_max <- max(fechas, na.rm = TRUE)
+  }
+}
+
+### Porcentajes
+# Porcentaje de conservación
+porcentaje_conservado <- (n_final / n_inicial)*100
+porcentaje_eliminado <- 1 - porcentaje_conservado
+
+### Identificación de Variables
+nombres_variables <- names(df_analisis)
+
+# Primeras observaciones
+head(df_analisis)
+```
+
+<!--
+A partir de los identificadores obtenidos en la consulta inicial, se realiza una segunda consulta a la API de TMDB para recuperar información más detallada de cada película. De esta manera, se construye la base de datos que será utilizada posteriormente para el análisis exploratorio.
+-->
+
+### ¿De dónde vienen los datos?
+<div style=" display:flex; 
+  align-items:center; 
+  gap:35px; width:100%; 
+  min-height:220px; "> 
+
+<div style=" flex:1; 
+  font-size:17px; 
+  line-height:1.6; 
+  color:#2B2B2B; "> 
+
+<p> El análisis utiliza información obtenida de la <strong style="color:#00366D;">API pública de The Movie Database (TMDB)</strong>, plataforma que consolida datos globales de la industria cinematográfica.
+</p>
+
+<p> La recolección se ejecutó en dos fases: primero se obtuvo un catálogo general de las películas más populares mediante su identificador único (ID). Posteriormente, cada registro se enriqueció con consultas individuales sobre su producción, desempeño financiero y recepción del público. </p> <p> La muestra inicial abarca <strong style="color:#00366D;">`r total_ids` películas</strong> ordenadas por popularidad. Tras el proceso de depuración y filtrado, se conformó la base de datos final utilizada en este análisis exploratorio.
+</p> 
+
+</div> 
+
+<div style=" width:240px; 
+  height:190px; 
+  display:flex; 
+  align-items:center; 
+  justify-content:center; 
+  flex-shrink:0; ">
+
+<img 
+  src="images/datos.png" alt="Cinema" 
+  style=" width:100%; 
+  max-height:190px; 
+  object-fit:contain; 
+  opacity:.9; ">
+
+</div> 
+</div>
+
+<div style="
+  display:flex;
+  align-items:stretch;
+  justify-content:center;
+  gap:10px;
+  margin:20px 0 10px 0;
+">
+
+<div style="
+  flex:1;
+  background:#00366D;
+  color:white;
+  padding:20px 12px;
+  border-radius:8px;
+  text-align:center;
+">
+  <div style="font-size:30px;">🌐</div>
+  <strong>API de TMDB</strong>
+  <br>
+  <span style="font-size:12px;">
+    Fuente de información
+  </span>
+</div>
+
+<div style="
+  display:flex;
+  align-items:center;
+  color:#C69A2F;
+  font-size:25px;
+">
+→
+</div>
+
+<div style="
+  flex:1;
+  background:#F4F6F8;
+  padding:20px 12px;
+  border-radius:8px;
+  text-align:center;
+  border-top:4px solid #C69A2F;
+">
+  <div style="font-size:30px;">🎬</div>
+  <strong>`r total_ids` películas</strong>
+  <br>
+  <span style="font-size:12px;">
+    Ordenadas por popularidad
+  </span>
+</div>
+
+<div style="
+  display:flex;
+  align-items:center;
+  color:#C69A2F;
+  font-size:25px;
+">
+→
+</div>
+
+<div style="
+  flex:1;
+  background:#F4F6F8;
+  padding:20px 12px;
+  border-radius:8px;
+  text-align:center;
+  border-top:4px solid #5B8FF9;
+">
+  <div style="font-size:30px;">🔑</div>
+  <strong>Identificadores</strong>
+  <br>
+  <span style="font-size:12px;">
+    ID único de cada película
+  </span>
+</div>
+
+<div style="
+  display:flex;
+  align-items:center;
+  color:#C69A2F;
+  font-size:25px;
+">
+→
+</div>
+
+<div style="
+  flex:1;
+  background:#00366D;
+  color:white;
+  padding:20px 12px;
+  border-radius:8px;
+  text-align:center;
+">
+  <div style="font-size:30px;">📊</div>
+  <strong>Información detallada</strong>
+  <br>
+  <span style="font-size:12px;">
+    Variables para el análisis
+  </span>
+</div>
+
+</div>
+
+Row 
+-------------------------------------
+### Estructura de la base
+
+La información recopilada permite analizar las películas desde distintas dimensiones, incluyendo su desempeño financiero, recepción del público y características de producción. Cada registro corresponde a una película y se identifica mediante un ID único asignado por TMDB.
+
+<div style=" width:100%; 
+  margin:25px 0 15px 0; 
+  padding:25px 30px; 
+  background:#F8FAFC; 
+  border-left:5px solid #C69A2F; 
+  border-radius:10px; ">
+
+<div style=" display:flex; 
+  align-items:center; 
+  justify-content:center; 
+  gap:0; ">
+
+<div style="flex:1; 
+  text-align:center;">
+
+<div style=" font-size:34px; 
+  font-weight:700; 
+  color:#00366D; "> `r total_ids` 
+</div>
+
+<div style=" font-size:13px; 
+  color:#64748B; 
+  margin-top:4px; "> películas recopiladas
+</div>
+
+</div>
+
+<div style=" width:1px; 
+  height:55px; 
+  background:#D9DEE7; ">
+</div>
+
+<div style="flex:1; 
+  text-align:center;">
+
+<div style=" font-size:34px; 
+  font-weight:700; 
+  color:#C69A2F; "> `r n_variables` 
+</div>
+
+<div style=" font-size:13px; 
+  color:#64748B; 
+  margin-top:4px; "> variables disponibles 
+</div>
+
+</div>
+
+<div style=" width:1px; 
+  height:55px; 
+  background:#D9DEE7; ">
+</div>
+
+<div style="flex:1; 
+  text-align:center;">
+
+<div style=" font-size:19px; 
+  font-weight:700; 
+  color:#00366D; "> `r format(fecha_min, "%d/%m/%Y")` 
+</div>
+
+<div style=" font-size:13px; 
+  color:#64748B; 
+  margin-top:4px; "> primer estreno registrado 
+</div>
+
+</div>
+
+<div style=" width:1px; 
+  height:55px; 
+  background:#D9DEE7; ">
+</div>
+
+<div style="flex:1; 
+  text-align:center;">
+
+<div style=" font-size:19px; 
+  font-weight:700; 
+  color:#00366D; "> `r format(fecha_max, "%d/%m/%Y")` 
+</div>
+
+<div style=" font-size:13px; 
+  color:#64748B; 
+  margin-top:4px; "> último estreno registrado 
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+<div style=" display:flex; 
+  gap:15px; 
+  margin-top:15px; ">
+
+<div style=" flex:1; 
+  padding:18px 20px; 
+  background:#00366D; 
+  color:white; border-radius:9px; ">
+
+<div style=" font-size:13px; 
+  text-transform:uppercase; 
+  letter-spacing:1px; 
+  color:#E8C873; 
+  font-weight:700; margin-bottom:8px; "> Desempeño financiero 
+</div>
+
+<div style="font-size:14px; line-height:1.5;"> Presupuesto e ingresos permiten caracterizar el comportamiento económico de cada producción. 
+</div>
+
+</div>
+
+<div style=" flex:1; 
+  padding:18px 20px; 
+  background:#F4F6F8; 
+  border-radius:9px; 
+  border-top:3px solid #C69A2F; ">
+
+<div style=" font-size:13px; 
+  text-transform:uppercase; 
+  letter-spacing:1px; 
+  color:#00366D; 
+  font-weight:700; 
+  margin-bottom:8px; "> Recepción 
+</div>
+
+<div style="font-size:14px; line-height:1.5; color:#2B2B2B;"> Popularidad, calificación promedio y número de votos permiten aproximarse a la recepción de las películas. </div>
+
+</div>
+
+<div style=" flex:1; 
+  padding:18px 20px; 
+  background:#F4F6F8; 
+  border-radius:9px; 
+  border-top:3px solid #5B8FF9; ">
+
+<div style=" font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#00366D; font-weight:700; margin-bottom:8px; "> Producción </div>
+
+<div style="font-size:14px; line-height:1.5; color:#2B2B2B;"> Géneros, director, reparto, productoras, países y franquicias describen las características de producción. </div>
+
+</div>
+
+</div>
+
+Row
+-------------------------------------
+### Descripción de las variables
+
+La base está conformada por <strong style="color:#00366D;">`r n_variables` variables</strong> que contienen información relacionada con las características generales de cada película, su desempeño financiero, la recepción por parte de los usuarios y aspectos de producción.
+
+```{r, echo=FALSE}
+library(htmltools)
+
+HTML('
+<style>
+/* Contenedor centrado y responsivo */
+.dict-pills-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  border: 1px solid #eef1f6;
+  justify-content: center; /* Alineación centrada estética */
+  align-items: center;
+  margin: 10px 0 25px 0;
+  position: relative;
+}
+
+/* Estilo individual de cada Pill */
+.dict-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.dict-pill:hover, .dict-pill.active {
+  background: #0b1021;
+  color: #ffffff;
+  border-color: #0b1021;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(11, 16, 33, 0.25);
+  z-index: 100;
+}
+
+/* Punto indicador de categoría */
+.dict-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+
+.dict-pill:hover .dict-dot {
+  transform: scale(1.2);
+}
+
+/* Colores por Categoría */
+.dot-general { background-color: #64748b; }
+.dot-recepcion { background-color: #eab308; }
+.dot-finanzas { background-color: #22c55e; }
+.dot-produccion { background-color: #3b82f6; }
+
+/* Tooltip / Pestaña Flotante (Despliegue hacia ABAJO para evitar recortes) */
+.dict-tooltip {
+  visibility: hidden;
+  opacity: 0;
+  width: 250px;
+  background: #0f172a;
+  color: #f8fafc;
+  text-align: left;
+  border-radius: 8px;
+  padding: 12px 14px;
+  position: absolute;
+  z-index: 9999;
+  top: 125%; /* Se despliega hacia abajo */
+  left: 50%;
+  transform: translateX(-50%) translateY(-4px);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.dict-tooltip-header {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+  font-weight: 700;
+}
+
+.dict-tooltip-body {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.45;
+  color: #e2e8f0;
+  white-space: normal;
+}
+
+/* Flechita superior aparente */
+.dict-tooltip::after {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  margin-left: -6px;
+  border-width: 6px;
+  border-style: solid;
+  border-color: transparent transparent #0f172a transparent;
+}
+
+.dict-pill:hover .dict-tooltip,
+.dict-pill.active .dict-tooltip {
+  visibility: visible;
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+</style>
+
+<div class="dict-pills-container" id="pillsContainer"></div>
+
+<script>
+setTimeout(function() {
+  const variablesData = [
+    { id: "id", desc: "Identificador único asignado a cada película en TMDB.", cat: "General", class: "dot-general" },
+    { id: "titulo", desc: "Título oficial de la película comercializada.", cat: "General", class: "dot-general" },
+    { id: "popularidad", desc: "Índice de popularidad relativo calculado por algoritmos de TMDB.", cat: "Recepción", class: "dot-recepcion" },
+    { id: "presupuesto", desc: "Presupuesto estimado de producción reportado en dólares ($).", cat: "Finanzas", class: "dot-finanzas" },
+    { id: "ingresos", desc: "Recaudación global obtenida por la película ($).", cat: "Finanzas", class: "dot-finanzas" },
+    { id: "tiempo_duracion", desc: "Duración total del largometraje medida en minutos.", cat: "General", class: "dot-general" },
+    { id: "calif_promedio", desc: "Calificación promedio otorgada por la comunidad de TMDB (0 a 10).", cat: "Recepción", class: "dot-recepcion" },
+    { id: "num_votos", desc: "Cantidad total de evaluaciones o votos registrados para la película.", cat: "Recepción", class: "dot-recepcion" },
+    { id: "franquicia", desc: "Indica si la película forma parte de una saga o colección.", cat: "Producción", class: "dot-produccion" },
+    { id: "fecha_estreno", desc: "Fecha exacta de la primera proyección pública.", cat: "General", class: "dot-general" },
+    { id: "lenguaje", desc: "Idioma original de la cinta (código ISO).", cat: "Producción", class: "dot-produccion" },
+    { id: "generos", desc: "Géneros cinematográficos asociados (Acción, Drama, etc.).", cat: "General", class: "dot-general" },
+    { id: "director", desc: "Nombre del director o cineasta principal.", cat: "Producción", class: "dot-produccion" },
+    { id: "top_actores", desc: "Nombres del reparto principal (Top 3 en créditos).", cat: "Producción", class: "dot-produccion" },
+    { id: "productoras", desc: "Estudios y empresas encargadas de la producción.", cat: "Producción", class: "dot-produccion" },
+    { id: "paises_productoras", desc: "Países de origen de las casas productoras.", cat: "Producción", class: "dot-produccion" },
+    { id: "palabras_clave", desc: "Etiquetas o temas clave vinculados al argumento de la película.", cat: "General", class: "dot-general" }
+  ];
+
+  const container = document.getElementById("pillsContainer");
+  container.innerHTML = "";
+
+  variablesData.forEach((item) => {
+    const pill = document.createElement("div");
+    pill.className = "dict-pill";
+    pill.innerHTML = `
+      <span class="dict-dot ${item.class}"></span>
+      <span>${item.id}</span>
+      <div class="dict-tooltip">
+        <div class="dict-tooltip-header">${item.cat} • ${item.id}</div>
+        <div class="dict-tooltip-body">${item.desc}</div>
+      </div>
+    `;
+
+    pill.onclick = function() {
+      document.querySelectorAll(".dict-pill").forEach(p => {
+        if(p !== pill) p.classList.remove("active");
+      });
+      pill.classList.toggle("active");
+    };
+
+    container.appendChild(pill);
+  });
+}, 100);
+</script>
+')
+```
+
+Calidad de los Datos {data-navmenu="Dataset"}
+=====================================
+<div style=" background:#001B3E; 
+  color:white; 
+  padding:25px 30px; 
+  border-radius:12px; 
+  margin:10px 0 25px 0; ">
+
+<div style=" font-size:13px; 
+  color:#E8C873; 
+  text-transform:uppercase; 
+  letter-spacing:2px; 
+  font-weight:700; "> CONTROL DE CALIDAD 
+</div>
+
+<div style=" font-size:28px; 
+  font-weight:700; 
+  margin-top:5px; "> De los datos originales a una base lista para analizar 
+</div>
+
+<div style=" font-size:15px; 
+  margin-top:8px; 
+  color:#D9E3F0; "> Se revisaron consistencia, completitud, duplicados y valores extremos antes del análisis. 
+</div>
+
+</div>
+
+<div style="
+  font-size:18px;
+  font-weight:700;
+  color:#00366D;
+  margin:8px 0 12px 0;
+">
+Depuración de la base
+</div>
+
+<div style="
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin:15px 0 22px 0;
+">
+
+<div style="flex:1;text-align:center;">
+<div style="
+  font-size:30px;
+  font-weight:700;
+  color:#00366D;
+">`r format(n_inicial, big.mark=",")`</div>
+<div style="
+  font-size:12px;
+  color:#64748B;
+  margin-top:3px;
+">registros iniciales</div>
+</div>
+
+<div style="
+  width:55px;
+  text-align:center;
+  font-size:22px;
+  color:#C69A2F;
+">→</div>
+
+<div style="flex:1;text-align:center;">
+<div style="
+  font-size:30px;
+  font-weight:700;
+  color:#C69A2F;
+">`r format(n_eliminados, big.mark=",")`</div>
+<div style="
+  font-size:12px;
+  color:#64748B;
+  margin-top:3px;
+">registros excluidos</div>
+</div>
+
+<div style="
+  width:55px;
+  text-align:center;
+  font-size:22px;
+  color:#C69A2F;
+">→</div>
+
+<div style="flex:1;text-align:center;">
+<div style="
+  font-size:30px;
+  font-weight:700;
+  color:#00366D;
+">`r format(n_final, big.mark=",")`</div>
+<div style="
+  font-size:12px;
+  color:#64748B;
+  margin-top:3px;
+">registros para el análisis</div>
+</div>
+
+</div>
+
+<div style="
+  text-align:center;
+  font-size:13px;
+  color:#4B5563;
+  margin:0 0 22px 0;
+">
+ La depuración conserva únicamente registros con información <strong style="color:#00366D;">válida, suficiente y coherente</strong> para el análisis. Estos registros se eliminan para evitar supuestos de imputación que puedan afectar los resultados.
+</div>
+
+<div style="
+  display:flex;
+  gap:12px;
+  margin-bottom:24px;
+">
+
+<div style="
+  flex:1;
+  padding:16px 18px;
+  background:#F8FAFC;
+  border-radius:10px;
+  border:1px solid #E2E8F0;
+  border-top:3px solid #00366D;
+">
+
+<div style="
+  font-size:11px;
+  color:#64748B;
+  text-transform:uppercase;
+  letter-spacing:1px;
+  font-weight:700;
+">Completitud</div>
+
+<div style="
+  font-size:25px;
+  font-weight:700;
+  color:#00366D;
+  margin-top:5px;
+">`r format(na_total, big.mark=",")`</div>
+
+<div style="
+  font-size:12px;
+  color:#4B5563;
+  margin-top:2px;
+">valores faltantes identificados</div>
+
+</div>
+
+<div style="
+  flex:1;
+  padding:16px 18px;
+  background:#F8FAFC;
+  border-radius:10px;
+  border:1px solid #E2E8F0;
+  border-top:3px solid #00366D;
+">
+
+<div style="
+  font-size:11px;
+  color:#64748B;
+  text-transform:uppercase;
+  letter-spacing:1px;
+  font-weight:700;
+">Unicidad</div>
+
+<div style="
+  font-size:25px;
+  font-weight:700;
+  color:#00366D;
+  margin-top:5px;
+">`r duplicados_ids`</div>
+
+<div style="
+  font-size:12px;
+  color:#4B5563;
+  margin-top:2px;
+">IDs duplicados</div>
+
+</div>
+
+<div style="
+  flex:1;
+  padding:16px 18px;
+  background:#F8FAFC;
+  border-radius:10px;
+  border:1px solid #E2E8F0;
+  border-top:3px solid #C69A2F;
+">
+
+<div style="
+  font-size:11px;
+  color:#64748B;
+  text-transform:uppercase;
+  letter-spacing:1px;
+  font-weight:700;
+">Valores extremos</div>
+
+<div style="
+  font-size:25px;
+  font-weight:700;
+  color:#C69A2F;
+  margin-top:5px;
+">`r format(total_atipicos1, big.mark=",")`</div>
+
+<div style="
+  font-size:12px;
+  color:#4B5563;
+  margin-top:2px;
+">observaciones detectadas mediante IQR</div>
+
+</div>
+
+</div>
+
+<div style="
+  font-size:18px;
+  font-weight:700;
+  color:#00366D;
+  margin:20px 0 12px 0;
+">
+Valores atípicos
+</div>
+
+<div style="
+  display:flex;
+  gap:25px;
+  align-items:flex-start;
+  margin-top:18px;
+">
+
+  <div style="
+    flex:0.9;
+    padding:18px 22px;
+    background:#F8FAFC;
+    border-radius:10px;
+    border-left:4px solid #C69A2F;
+    font-size:13px;
+    line-height:1.5;
+    color:#4B5563;
+  ">
+
+  <p style="
+    margin:0 0 8px 0;
+      font-size:16px;
+      font-weight:700;
+      color:#00366D;
+  ">
+    Criterio del rango intercuartílico (IQR)
+    </p>
+
+  <p style="margin:0;">
+El criterio IQR permitió identificar observaciones con valores extremos en las variables numéricas. Estas observaciones fueron revisadas para determinar si correspondían a inconsistencias o a características reales de las películas.
+  </p>
+
+  </div>
+
+  <div style="
+    flex:1.4;
+    overflow:hidden;
+  ">
+
+```{r}
+analizar_atipicos <- function(variable) {
+  x <- df_analisis[[variable]]
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_variable <- IQR(x, na.rm = TRUE)
+  limite_inferior <- Q1 - 1.5 * IQR_variable
+  limite_superior <- Q3 + 1.5 * IQR_variable
+  cantidad_atipicos <- sum(x < limite_inferior | x > limite_superior, na.rm = TRUE)
+  porcentaje_atipicos <- cantidad_atipicos / sum(!is.na(x)) * 100
+
+  tibble(
+    variable = variable,
+    cantidad_atipicos = comma(cantidad_atipicos),
+    porcentaje_atipicos = paste0(round(porcentaje_atipicos, 2), "%")
+  )
+}
+
+tabla_atipicos <- map_dfr(variables_numericas, analizar_atipicos)
+
+datatable(
+  tabla_atipicos,
+  rownames = FALSE,
+  options = list(
+    dom = "t",
+    pageLength = 10
+  ),
+  class = "stripe hover"
+)
+```
+
+</div> 
+</div> 
+
+<div style=" margin-top:18px; 
+  padding:16px 20px; 
+  background:#FFF9E8; 
+  border-radius:10px; 
+  border-left:4px solid #C69A2F; "> 
+  
+<div style=" font-size:14px; 
+  font-weight:700; 
+  color:#00366D; 
+  margin-bottom:5px; "> OBSERVACIÓN: 
+</div>
+
+<div style=" font-size:13px; 
+  line-height:1.5; 
+  color:#374151; "> Aunque el criterio IQR identifica observaciones atípicas, los valores revisados no presentan inconsistencias evidentes y pueden corresponder a películas reales con características excepcionalmente altas o bajas. Por ello, se conservan en la base de análisis. 
+  
+</div> 
+</div>
+
+Row {style="margin-top:35px;"}
+-------------------------------------
+
+### Criterios de depuración
+
+<div style="
+  display:flex;
+  gap:20px;
+  margin-top:10px;
+  margin-bottom:20px;
+">
+
+<div style="
+  flex:1;
+  padding:20px;
+  background:#F4F6F8;
+  border-radius:10px;
+">
+
+<div style="
+  font-size:14px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:12px;
+">
+Se excluyen
+</div>
+
+<div style="
+  font-size:12px;
+  color:#374151;
+  line-height:1.7;
+">
+
+<div>• Fechas de estreno faltantes o fuera del periodo de estudio.</div>
+<div>• Presupuesto o ingresos iguales o inferiores a 50 USD.</div>
+<div>• Películas sin duración.</div>
+<div>• Películas sin votos registrados.</div>
+
+</div>
+
+</div>
+
+<div style="
+  flex:1;
+  padding:20px;
+  background:#FFF9E8;
+  border-radius:10px;
+">
+
+<div style="
+  font-size:14px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:12px;
+">
+Se conserva
+</div>
+
+<div style="
+  font-size:12px;
+  color:#374151;
+  line-height:1.7;
+">
+
+Los valores atípicos no se eliminan automáticamente. Se identifican mediante el criterio del rango intercuartílico (IQR), pero pueden representar películas con comportamientos reales dentro de la industria. Por ello, se conservan cuando no existe evidencia de errores de captura o inconsistencias.
+
+</div>
+
+</div>
+
+</div>
+
+<div style="
+  display:flex;
+  align-items:center;
+  gap:18px;
+  padding:17px 20px;
+  background:#001B3E;
+  border-radius:10px;
+  margin-top:5px;
+">
+
+<div style="
+  width:38px;
+  height:38px;
+  flex-shrink:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:#C69A2F;
+  color:#001B3E;
+  border-radius:50%;
+  font-size:19px;
+  font-weight:700;
+">✓</div>
+
+<div style="flex:1;">
+
+<div style="
+  font-size:11px;
+  color:#E8C873;
+  text-transform:uppercase;
+  letter-spacing:1.2px;
+  font-weight:700;
+">
+Resultado de la depuración
+</div>
+
+<div style="
+  font-size:16px;
+  font-weight:700;
+  color:white;
+  margin-top:3px;
+">
+La base queda lista para el análisis
+</div>
+
+</div>
+
+<div style="
+  text-align:right;
+  padding-left:20px;
+  border-left:1px solid #49627F;
+">
+
+<div style="
+  font-size:46px;
+  font-weight:700;
+  color:#E8C873;
+">
+`r round(porcentaje_conservado, 1)`%
+</div>
+
+<div style="
+  font-size:20px;
+  color:#D9E3F0;
+  margin-top:2px;
+">
+`r format(n_final, big.mark=",")` películas conservadas
+</div>
+
+</div>
+
+</div>
+
+Panorama Descriptivo {data-navmenu="Análisis Exploratorio"}
+=====================================
+
+<div style="
+  margin-top:12px;
+  padding:16px 20px;
+  background:#F8FAFC;
+  border-radius:8px;
+  border-left:4px solid #00366D;
+">
+
+  <div style="
+    font-size:18px;
+    font-weight:700;
+    color:#00366D;
+    margin-bottom:6px;
+  ">
+  Análisis descriptivo de variables numéricas
+  </div>
+
+  <div style="
+    font-size:14px;
+    line-height:1.5;
+    color:#4B5563;
+  ">
+  Se revisan los principales <strong>estadísticos descriptivos</strong> para identificar la
+  <strong>tendencia central, dispersión y rango</strong> de las variables numéricas,
+  así como las diferencias entre las películas de la muestra.
+  </div>
+
+</div>
+```{r}
+resumen_numerico <- df_analisis %>%
+  select(all_of(variables_numericas)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "valor") %>%
+  group_by(variable) %>%
+  summarise(
+    minimo = comma(min(valor, na.rm = TRUE), accuracy = 0.01),
+    Q1 = comma(quantile(valor, 0.25, na.rm = TRUE), accuracy = 0.01),
+    mediana = comma(median(valor, na.rm = TRUE), accuracy = 0.01),
+    media = comma(mean(valor, na.rm = TRUE), accuracy = 0.01),
+    Q3 = comma(quantile(valor, 0.75, na.rm = TRUE), accuracy = 0.01),
+    maximo = comma(max(valor, na.rm = TRUE), accuracy = 0.01),
+    desviacion_estandar = comma(sd(valor, na.rm = TRUE), accuracy = 0.01)
+  )
+
+datatable(resumen_numerico, rownames = FALSE, options = list(dom = "t", pageLength = 7), class = "stripe hover")
+
+media_calificacion <- mean(df_analisis$calif_promedio, na.rm = TRUE)
+media_duracion <- mean(df_analisis$tiempo_duracion, na.rm = TRUE)
+```
+
+<div style="
+  margin-top:12px;
+  padding:14px 18px;
+  background:#F8FAFC;
+  border-radius:8px;
+  border-left:4px solid #00366D;
+">
+
+  <div style="
+    font-size:13px;
+    font-weight:700;
+    color:#00366D;
+    margin-bottom:5px;
+  ">
+  Interpretación
+  </div>
+
+  <div style="
+    font-size:13px;
+    line-height:1.5;
+    color:#4B5563;
+  ">
+  Las películas presentan calificaciones cercanas a `r round(media_calificacion, 1)` y una duración promedio de `r round(media_duracion, 0)` minutos. En contraste, variables como ROI, ingresos, presupuesto, popularidad y número de votos muestran mayor dispersión y presencia de valores extremos, reflejando una mayor heterogeneidad entre las películas de la muestra.
+  </div>
+
+</div>
+
+Row {style="margin-top:35px;"}
+-------------------------------------
+### D I S T R I B U C I Ó N
+
+Después de revisar los estadísticos descriptivos, se analiza la distribución de las variables numéricas mediante histogramas. Esta visualización permite identificar patrones de concentración, asimetrías y variabilidad, así como diferencias en el comportamiento de las películas de la muestra.
+
+Row {.tabset}
+-------------------------------------
+### Popularidad
+```{r}
+p <- ggplot(df_analisis, aes(x = popularidad, text = after_stat(count))) +
+  geom_histogram(bins = 30, fill = azul_unam, color = "white") +
+  labs(title = "Distribución de popularidad", x = "Popularidad", y = "Frecuencia") +
+  tema_unam()
+ggplotly(p)
+```
+
+### Presupuesto
+```{r}
+p <- ggplot(df_analisis, aes(x = presupuesto)) +
+  geom_histogram(bins = 30, fill = azul_unam, color = "white") +
+  scale_x_continuous(labels = label_number(scale = 1e-6, suffix = "M")) +
+  labs(title = "Distribución del presupuesto", x = "Presupuesto (millones USD)", y = "Frecuencia") +
+  tema_unam()
+ggplotly(p)
+```
+
+### Ingresos
+```{r}
+p <- ggplot(df_analisis, aes(x = ingresos)) +
+  geom_histogram(bins = 30, fill = dorado_unam, color = "white") +
+  scale_x_continuous(labels = label_number(scale = 1e-6, suffix = "M")) +
+  labs(title = "Distribución de los ingresos", x = "Ingresos (millones USD)", y = "Frecuencia") +
+  tema_unam()
+ggplotly(p)
+```
+
+### Duración
+```{r}
+p <- ggplot(df_analisis, aes(x = tiempo_duracion)) +
+  geom_histogram(bins = 30, fill = azul_claro, color = "white") +
+  labs(title = "Distribución de la duración", x = "Duración (minutos)", y = "Frecuencia") +
+  tema_unam()
+ggplotly(p)
+```
+
+### Calificación
+```{r}
+p <- ggplot(df_analisis, aes(x = calif_promedio)) +
+  geom_histogram(bins = 30, fill = dorado_claro, color = "white") +
+  labs(title = "Distribución de la calificación promedio", x = "Calificación promedio", y = "Frecuencia") +
+  tema_unam()
+ggplotly(p)
+```
+
+### Núm. de votos
+```{r}
+p <- ggplot(df_analisis, aes(x = num_votos)) +
+  geom_histogram(bins = 30, fill = azul_unam, color = "white") +
+  labs(title = "Distribución del número de votos", x = "Número de votos", y = "Frecuencia") +
+  tema_unam()
+ggplotly(p)
+```
+
+Row
+-------------------------------------
+
+### Interpretación de las distribuciones
+
+<div style="display:flex; gap:18px; 
+  margin-top:12px;">
+
+<div style="flex:1; padding:16px 18px; 
+  background:#F8FAFC; 
+  border-radius:9px; 
+  border-top:4px solid #00366D;">
+
+<strong style="font-size:15px; 
+  color:#00366D;">Mayor variabilidad</strong>
+
+<p style="font-size:13px; line-height:1.5; color:#4B5563; margin:8px 0 0 0;">
+<strong>Ingresos, presupuesto, votos y popularidad</strong> concentran la mayoría de las películas en valores bajos y presentan una <strong>asimetría hacia la derecha</strong>, con algunos valores considerablemente mayores.
+</p>
+
+</div>
+
+<div style="flex:1; 
+  padding:16px 18px; 
+  background:#FFF9E8; 
+  border-radius:9px; 
+  border-top:4px solid #C69A2F;">
+
+<strong style="font-size:15px; color:#00366D;">Mayor concentración</strong>
+
+<p style="font-size:13px; line-height:1.5; color:#4B5563; margin:8px 0 0 0;">
+<strong>Calificación promedio y duración</strong> muestran distribuciones más concentradas, con mayor acumulación de películas alrededor de valores centrales y un comportamiento más uniforme.
+</p>
+
+</div>
+
+</div>
+
+Perfil de Contenido {data-navmenu="Análisis Exploratorio"}
+=====================================
+
+<div style="
+  background:#001B3E;
+  color:white;
+  padding:25px 30px;
+  border-radius:12px;
+  margin:10px 0 25px 0;
+">
+
+<div style="
+  font-size:25px;
+  font-weight:700;
+  margin-top:6px;
+">
+ Franquicia, idioma y género
+</div>
+
+<div style="
+  font-size:14px;
+  color:#D9E2EC;
+  margin-top:8px;
+">
+Características de contenido asociadas con el desempeño de las películas.
+</div>
+
+</div>
+
+Row 
+-------------------------------------
+### {.no-title}
+
+<div style="
+  margin-top:10px;
+  padding:16px 20px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-left:4px solid #00366D;
+">
+
+  Se exploran las variables categóricas relacionadas con la
+  <strong style="color:#00366D;">franquicia, idioma y género</strong>
+  para identificar su presencia y distribución dentro de la muestra.
+
+</div>
+
+Row {.tabset}
+-------------------------------------
+
+### Franquicia
+```{r}
+tabla_franquicia <- df_analisis %>%
+  count(franquicia) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 2))
+
+p <- ggplot(tabla_franquicia, aes(x = franquicia, y = n, fill = franquicia,
+    text = paste0(franquicia, "<br>", n, " películas (", porcentaje, "%)"))) +
+  geom_col() +
+  scale_fill_manual(values = c(azul_unam, dorado_unam)) +
+  labs(title = "Películas según pertenencia a una franquicia", x = "Pertenece a una franquicia", y = "Número de películas") +
+  tema_unam() + theme(legend.position = "none")
+ggplotly(p, tooltip = "text")
+```
+
+### Idioma original (top 10)
+```{r}
+tabla_lenguaje <- df_analisis %>%
+  count(lenguaje, sort = TRUE) %>%
+  slice_head(n = 10) %>%
+  mutate(
+  idioma = recode(
+    lenguaje,
+    "en" = "Inglés",
+    "fr" = "Francés",
+    "es" = "Español",
+    "ja" = "Japonés",
+    "de" = "Alemán",
+    "it" = "Italiano",
+    "ko" = "Coreano",
+    "cn" = "Chino",
+    "zh" = "Chino",
+    "hi" = "Hindi",
+    "pt" = "Portugués",
+    "ru" = "Ruso"
+  ),
+  porcentaje = round(n / sum(n) * 100, 1),
+  idioma = reorder(idioma, n)
+)
+
+p <- ggplot(
+  tabla_lenguaje,
+  aes(
+    x = idioma,
+    y = n,
+    text = paste0(
+      "<b>", idioma, "</b>",
+      "<br>", n, " películas",
+      "<br>", porcentaje, "% del top 10"
+    )
+  )
+) +
+  geom_col(
+    fill = azul_unam,
+    width = 0.65
+  ) +
+  coord_flip() +
+  labs(
+    title = "Idiomas originales más frecuentes",
+    x = NULL,
+    y = "Número de películas"
+  ) +
+  tema_unam() +
+  theme(
+    plot.title = element_text(
+      size = 14,
+      face = "bold",
+      color = azul_unam
+    ),
+    axis.text.y = element_text(size = 10)
+  )
+
+ggplotly(p, tooltip = "text") %>%
+  layout(
+    margin = list(l = 90, r = 20, t = 50, b = 40)
+  )
+```
+
+### Géneros
+```{r}
+generos_individuales <- df_analisis %>%
+  select(id, generos) %>%
+  separate_rows(generos, sep = ",") %>%
+  mutate(generos = trimws(generos)) %>%
+  filter(!is.na(generos), generos != "")
+
+tabla_generos <- generos_individuales %>% count(generos, sort = TRUE)
+
+p <- ggplot(tabla_generos, aes(x = reorder(generos, n), y = n, text = paste0(generos, ": ", n))) +
+  geom_col(fill = dorado_unam) +
+  coord_flip() +
+  labs(title = "Distribución de películas por género", x = "Género", y = "Número de películas") +
+  tema_unam()
+ggplotly(p, tooltip = "text")
+```
+
+Row
+-------------------------------------
+### Interpretación
+
+<div style="display:flex; gap:16px; margin-top:12px;">
+
+<div style="
+  flex:1;
+  padding:16px 18px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-top:4px solid #00366D;
+">
+
+<div style="
+  font-size:15px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:7px;
+">
+Franquicias
+</div>
+
+<div style="
+  font-size:13px;
+  line-height:1.5;
+  color:#4B5563;
+">
+La mayoría de las películas <strong>no pertenece a una franquicia</strong>, aunque las producciones asociadas a ellas mantienen una presencia significativa dentro de la muestra.
+</div>
+
+</div>
+
+
+<div style="
+  flex:1;
+  padding:16px 18px;
+  background:#FFF9E8;
+  border-radius:9px;
+  border-top:4px solid #C69A2F;
+">
+
+<div style="
+  font-size:15px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:7px;
+">
+Idiomas
+</div>
+
+<div style="
+  font-size:13px;
+  line-height:1.5;
+  color:#4B5563;
+">
+El <strong>inglés concentra ampliamente</strong> la distribución de idiomas originales, mientras que el resto presenta una participación considerablemente menor.
+</div>
+
+</div>
+
+
+<div style="
+  flex:1;
+  padding:16px 18px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-top:4px solid #00366D;
+">
+
+<div style="
+  font-size:15px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:7px;
+">
+Géneros
+</div>
+
+<div style="
+  font-size:13px;
+  line-height:1.5;
+  color:#4B5563;
+">
+<strong>Drama y Comedia</strong> destacan por su frecuencia, seguidos por Suspense y Acción. Géneros como Western, Documental y Película de TV tienen una presencia mucho menor.
+</div>
+
+</div>
+
+</div>
+
+Row
+-------------------------------------
+
+### Palabras clave más frecuentes
+```{r}
+palabrasclave_individuales <- df_analisis %>%
+  select(palabras_clave) %>%
+  separate_rows(palabras_clave, sep = ", ")
+
+top_palabras <- palabrasclave_individuales %>%
+  count(palabras_clave, sort = TRUE) %>%
+  filter(!is.na(palabras_clave), palabras_clave != "") %>%
+  slice_head(n = 10)
+
+p <- ggplot(top_palabras, aes(x = n, y = reorder(palabras_clave, n), text = paste0(palabras_clave, ": ", n))) +
+  geom_col(fill = azul_claro) +
+  labs(title = "Top 10 palabras clave más frecuentes", x = "Cantidad de películas", y = "") +
+  tema_unam()
+ggplotly(p, tooltip = "text")
+```
+
+### Top 20 actores con más películas
+```{r}
+actores_individuales <- df_analisis %>%
+  select(id, top_actores) %>%
+  separate_rows(top_actores, sep = ",") %>%
+  mutate(top_actores = trimws(top_actores)) %>%
+  filter(!is.na(top_actores), top_actores != "")
+
+tabla_actores <- actores_individuales %>% count(top_actores, sort = TRUE) %>% slice_head(n = 20)
+
+p <- ggplot(tabla_actores, aes(x = reorder(top_actores, n), y = n, text = paste0(top_actores, ": ", n))) +
+  geom_col(fill = azul_unam) +
+  coord_flip() +
+  labs(title = "Top 20 actores con más películas", x = "", y = "Número de películas") +
+  tema_unam()
+ggplotly(p, tooltip = "text")
+```
+
+Row 
+-------------------------------------
+### {.no-title}
+
+<div style="display:flex; gap:12px; margin-top:10px; align-items: flex-start;">
+
+<div style="
+  flex:1;
+  padding:12px 16px;
+  background:#F8FAFC;
+  border-radius:8px;
+  border-left:3px solid #00366D;
+  box-sizing: border-box;
+">
+
+<div style="
+  font-size:14px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:5px;
+">
+Palabras clave
+</div>
+
+<div style="
+  font-size:12px;
+  line-height:1.4;
+  color:#4B5563;
+">
+Predominan las <strong>adaptaciones de libros, novelas y cómics</strong>, seguidas por lugares y temas recurrentes.
+</div>
+
+</div>
+
+<div style="
+  flex:1;
+  padding:12px 16px;
+  background:#FFF9E8;
+  border-radius:8px;
+  border-left:3px solid #C69A2F;
+  box-sizing: border-box;
+">
+
+<div style="
+  font-size:14px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:5px;
+">
+Frecuencia ≠ taquilla
+</div>
+
+<div style="
+  font-size:12px;
+  line-height:1.4;
+  color:#4B5563;
+">
+Tener más créditos no implica mayores ingresos. La <strong>franquicia o propiedad intelectual</strong> puede tener mayor peso en la taquilla.
+</div>
+
+</div>
+
+</div>
+
+Row
+-------------------------------------
+
+### Hallazgo relevante
+
+<div style=" margin-top:8px; 
+  padding:14px 18px; 
+  background:#00366D; 
+  border-radius:9px; 
+  color:white; ">
+
+<strong style="font-size:14px;">Tom Holland</strong>
+
+<div style=" font-size:12px; 
+
+  line-height:1.5; margin-top:5px; "> Aparece en dos de las películas con mayor recaudación de la muestra (Spider-Man y Los Vengadores), aunque no figura entre los actores con mayor número de créditos. Esto muestra que la <strong>frecuencia de participación y el desempeño en taquilla responden a dimensiones diferentes</strong>. </div> 
+</div> 
+  
+Rankings y Taquilla {data-navmenu="Análisis Exploratorio"}
+=====================================
+<div style="
+  background:#001B3E;
+  color:white;
+  padding:25px 30px;
+  border-radius:12px;
+  margin:10px 0 25px 0;
+">
+
+<div style="
+  font-size:25px;
+  font-weight:700;
+  margin-top:6px;
+">
+ Presupuesto, taquilla y ROI
+</div>
+
+<div style="
+  font-size:14px;
+  color:#D9E2EC;
+  margin-top:8px;
+">
+ Relación entre la inversión, los ingresos y el rendimiento de las películas.
+</div>
+
+</div>
+
+
+Row {.tabset}
+------------------------------------- 
+### Presupuesto vs. Ingresos
+
+```{r}
+datos_scatter <- df_analisis[
+  !is.na(df_analisis$presupuesto) &
+  !is.na(df_analisis$ingresos),
+]
+
+p <- ggplot(
+  datos_scatter,
+  aes(
+    x = presupuesto,
+    y = ingresos,
+    text = paste0(
+      "<b>", titulo, "</b>",
+      "<br>Presupuesto: $", round(presupuesto / 1e6, 1), " M",
+      "<br>Ingresos: $", round(ingresos / 1e6, 1), " M",
+      ifelse(
+        !is.na(roi),
+        paste0("<br>ROI: ", round(roi, 1), "x"),
+        ""
+      )
+    )
+  )
+) +
+  geom_point(alpha = 0.65, size = 2.5, color = azul_unam) +
+  scale_x_continuous(labels = scales::label_dollar(scale = 1e-6, suffix = " M")) +
+  scale_y_continuous(labels = scales::label_dollar(scale = 1e-6, suffix = " M")) +
+  labs(
+    title = "Relación entre presupuesto e ingresos",
+    x = "Presupuesto (USD)",
+    y = "Ingresos (USD)"
+  ) +
+  tema_unam()
+
+ggplotly(p, tooltip = "text")
+```
+
+### Rentabilidad
+
+```{r}
+roi_valido <- df_analisis[!is.na(df_analisis$roi), ]
+
+rentables <- sum(roi_valido$roi > 2.5)
+no_rentables <- sum(roi_valido$roi <= 2.5)
+total_roi <- nrow(roi_valido)
+
+porcentaje_rentables <- rentables / total_roi * 100
+porcentaje_no_rentables <- no_rentables / total_roi * 100
+
+datos_grafica <- data.frame(
+  categoria = factor(
+    c("ROI > 2.5", "ROI ≤ 2.5"),
+    levels = c("ROI > 2.5", "ROI ≤ 2.5")
+  ),
+  valor = c(rentables, no_rentables)
+)
+
+p <- ggplot(
+  datos_grafica,
+  aes(
+    x = categoria,
+    y = valor,
+    fill = categoria,
+    text = paste0(
+      categoria,
+      "<br>Películas: ",
+      format(valor, big.mark = ",")
+    )
+  )
+) +
+  geom_col(width = 0.5) +
+  geom_text(
+    aes(
+      label = paste0(
+        format(valor, big.mark = ","),
+        " (",
+        round(valor / total_roi * 100, 1),
+        "%)"
+      )
+    ),
+    vjust = -0.4,
+    size = 4
+  ) +
+  scale_fill_manual(
+    values = c(
+      "ROI > 2.5" = dorado_unam,
+      "ROI ≤ 2.5" = azul_unam
+    )
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title = "Distribución de películas según ROI",
+    subtitle = paste0(
+      "Total de películas con ROI disponible: ",
+      format(total_roi, big.mark = ",")
+    ),
+    x = "",
+    y = "Cantidad de películas"
+  ) +
+  tema_unam() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "#64748B"),
+    axis.text.x = element_text(size = 11),
+    axis.text.y = element_text(size = 10)
+  )
+
+ggplotly(
+  p,
+  tooltip = "text"
+) %>%
+  layout(
+    margin = list(t = 70, b = 50, l = 50, r = 20)
+  )
+```
+
+Row {.tabset}
+-------------------------------------
+
+### Mayor presupuesto
+```{r}
+top10_presupuesto <- df_analisis[order(-df_analisis$presupuesto), ][1:10, ]
+
+p <- ggplot(top10_presupuesto, aes(x = presupuesto, y = reorder(titulo, presupuesto),
+    text = paste0(titulo, ": $", round(presupuesto / 1e6, 0), "M"))) +
+  geom_col(fill = azul_unam) +
+  labs(title = "Top 10 películas con mayor presupuesto", x = "Presupuesto (USD)", y = "") +
+  tema_unam()
+ggplotly(p, tooltip = "text")
+```
+
+### Más taquilleras
+```{r}
+top10_taquilla <- df_analisis[order(-df_analisis$ingresos), ][1:10, ]
+
+p <- ggplot(top10_taquilla, aes(x = ingresos, y = reorder(titulo, ingresos),
+    text = paste0(titulo, ": $", round(ingresos / 1e6, 2), "M"))) +
+  geom_col(fill = dorado_unam) +
+  labs(title = "Top 10 películas más taquilleras", x = "Ganancia (USD)", y = "") +
+  tema_unam()
+ggplotly(p, tooltip = "text")
+```
+
+### Mejor ROI
+```{r}
+top10_roi <- df_analisis[!is.na(df_analisis$roi), ]
+top10_roi <- top10_roi[order(-top10_roi$roi), ][1:10, ]
+
+p <- ggplot(top10_roi, aes(x = roi, y = reorder(titulo, roi), text = paste0(titulo, ": ", roi, "x"))) +
+  geom_col(fill = azul_claro) +
+  labs(title = "Top 10 películas con mejor ROI", x = "ROI", y = "") +
+  tema_unam()
+ggplotly(p, tooltip = "text")
+```
+
+Row 
+-------------------------------------
+### {.no-title}
+
+<div style="
+  display:flex;
+  gap:12px;
+  margin-top:8px;
+  flex-wrap:wrap;
+  align-items:stretch;
+">
+
+<div style="
+  width:fit-content;
+  max-width:32%;
+  padding:12px 15px;
+  background:#F8FAFC;
+  border-left:4px solid #00366D;
+  border-radius:8px;
+">
+
+<div style="
+  font-size:13px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:5px;
+">
+Presupuesto y taquilla
+</div>
+
+<div style="
+  font-size:12px;
+  line-height:1.4;
+  color:#475569;
+">
+Las películas con mayor presupuesto no necesariamente son las que generan mayores ingresos.
+</div>
+
+</div>
+
+<div style="
+  width:fit-content;
+  max-width:32%;
+  padding:12px 15px;
+  background:#F8FAFC;
+  border-left:4px solid #C69A2F;
+  border-radius:8px;
+">
+
+<div style="
+  font-size:13px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:5px;
+">
+Rentabilidad
+</div>
+
+<div style="
+  font-size:12px;
+  line-height:1.4;
+  color:#475569;
+">
+El ROI permite identificar películas que obtuvieron ingresos elevados en relación con los recursos destinados a su producción.
+</div>
+
+</div>
+
+<div style="
+  width:fit-content;
+  max-width:32%;
+  padding:12px 15px;
+  background:#F8FAFC;
+  border-left:4px solid #00366D;
+  border-radius:8px;
+">
+
+<div style="
+  font-size:13px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:5px;
+">
+Eficiencia
+</div>
+
+<div style="
+  font-size:12px;
+  line-height:1.4;
+  color:#475569;
+">
+Los mayores ROI muestran que una inversión elevada no es un requisito para alcanzar una alta rentabilidad.
+</div>
+
+</div>
+
+</div>
+
+Relaciones y Correlaciones {data-navmenu="Análisis Exploratorio"}
+=====================================
+<div style="
+  background:#001B3E;
+  color:white;
+  padding:20px 26px;
+  border-radius:10px;
+  margin:5px 0 20px 0;
+">
+
+<div style="
+  font-size:24px;
+  font-weight:700;
+  margin-bottom:6px;
+">
+Relaciones entre variables
+</div>
+
+<div style="
+  font-size:14px;
+  line-height:1.5;
+  color:#E8C873;
+">
+¿Qué variables muestran una mayor asociación con los ingresos de una película?
+</div>
+
+</div>
+
+Row
+-------------------------------------
+
+### Matriz de correlación entre variables numéricas
+
+```{r}
+corr <- cor(df_analisis[variables_numericas], use = "complete.obs")
+corr_r <- round(corr, 2)
+
+plot_ly(
+  x = colnames(corr_r), y = rownames(corr_r), z = corr_r,
+  type = "heatmap",
+  colors = colorRamp(c("white", azul_claro, azul_oscuro)),
+  hovertemplate = "%{x} vs %{y}: %{z}<extra></extra>"
+) %>%
+  add_annotations(
+    x = rep(colnames(corr_r), each = nrow(corr_r)),
+    y = rep(rownames(corr_r), times = ncol(corr_r)),
+    text = as.character(t(corr_r)),
+    showarrow = FALSE,
+    font = list(size = 10, color = "black")
+  ) %>%
+  layout(title = "Correlación entre variables numéricas", xaxis = list(title = ""), yaxis = list(title = ""))
+```
+
+Row 
+-------------------------------------
+### {.no-title}
+<div style="display:flex; gap:12px; margin-top:12px;">
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-left:4px solid #00366D;
+  border-radius:8px;
+">
+<div style="font-size:13px;font-weight:700;color:#00366D;">
+Presupuesto e ingresos
+</div>
+<div style="font-size:12px;color:#475569;margin-top:5px;">
+Presentan la asociación positiva más alta observada (r = 0.69).
+</div>
+</div>
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-left:4px solid #C69A2F;
+  border-radius:8px;
+">
+<div style="font-size:13px;font-weight:700;color:#00366D;">
+Votos e ingresos
+</div>
+<div style="font-size:12px;color:#475569;margin-top:5px;">
+Existe una asociación positiva relevante, relacionada con el alcance de audiencia.
+</div>
+</div>
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-left:4px solid #00366D;
+  border-radius:8px;
+">
+<div style="font-size:13px;font-weight:700;color:#00366D;">
+Popularidad
+</div>
+<div style="font-size:12px;color:#475569;margin-top:5px;">
+Su relación con los ingresos es positiva, pero menor que la observada con presupuesto y votos.
+</div>
+</div>
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-left:4px solid #C69A2F;
+  border-radius:8px;
+">
+<div style="font-size:13px;font-weight:700;color:#00366D;">
+Calificación y duración
+</div>
+<div style="font-size:12px;color:#475569;margin-top:5px;">
+Muestran asociaciones débiles con los ingresos dentro de la muestra.
+</div>
+</div>
+
+</div>
+
+Row
+-------------------------------------
+### Ingresos y variables numéricas
+
+<div style="
+  margin:5px 0 12px 0;
+  font-size:13px;
+  color:#64748B;
+">
+La relación entre los ingresos y las principales variables numéricas permite identificar
+patrones generales de asociación y dispersión.
+</div>
+
+```{r, fig.height=7}
+variables_numericas_si <- setdiff(variables_numericas, c("ingresos", "roi"))
+
+graficas <- lapply(variables_numericas_si, function(var) {
+  
+  nombre_var <- case_when(
+    var == "num_votos" ~ "Número de votos",
+    var == "popularidad" ~ "Popularidad",
+    var == "calificacion" ~ "Calificación promedio",
+    var == "duracion" ~ "Duración",
+    var == "presupuesto" ~ "Presupuesto",
+    TRUE ~ var
+  )
+  
+  unidad_x <- case_when(
+    var == "num_votos" ~ "Número de votos",
+    var == "popularidad" ~ "Popularidad",
+    var == "calificacion" ~ "Calificación promedio",
+    var == "duracion" ~ "Duración (minutos)",
+    var == "presupuesto" ~ "Presupuesto (USD)",
+    TRUE ~ var
+  )
+  
+  p <- ggplot(df_analisis, aes(x = .data[[var]], y = ingresos)) +
+    geom_point(alpha = 0.4, color = azul_claro) +
+    geom_smooth(
+      method = "lm",
+      color = dorado_unam,
+      se = FALSE
+    ) +
+    labs(
+      title = paste("Ingresos vs", nombre_var),
+      x = unidad_x,
+      y = "Ingresos (USD)"
+    ) +
+    scale_y_continuous(
+      labels = label_number(
+        scale = 1e-6,
+        suffix = " M"
+      )
+    ) +
+    tema_unam(base_size = 9)
+
+  if (var == "presupuesto") {
+    p <- p +
+      scale_x_continuous(
+        labels = label_number(
+          scale = 1e-6,
+          suffix = " M"
+        )
+      )
+  } else {
+    p <- p +
+      scale_x_continuous(
+        labels = label_number(
+          big.mark = ",",
+          accuracy = 0.01
+        )
+      )
+  }
+  
+  p
+})
+
+subplot(
+  lapply(graficas, ggplotly),
+  nrows = 3,
+  margin = 0.06
+) %>%
+  layout(showlegend = FALSE)
+```
+
+Row 
+-------------------------------------
+### Lectura de los resultados
+
+<div style="display:flex; gap:12px; margin-top:10px;">
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-radius:8px;
+  border-left:4px solid #00366D;
+">
+
+<div style="
+  font-size:13px;
+  font-weight:700;
+  color:#00366D;
+">
+Presupuesto
+</div>
+
+<div style="
+  font-size:12px;
+  color:#475569;
+  line-height:1.45;
+  margin-top:5px;
+">
+Es la relación positiva más clara con los ingresos entre las variables
+numéricas analizadas.
+</div>
+
+</div>
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-radius:8px;
+  border-left:4px solid #C69A2F;
+">
+
+<div style="
+  font-size:13px;
+  font-weight:700;
+  color:#00366D;
+">
+Audiencia
+</div>
+
+<div style="
+  font-size:12px;
+  color:#475569;
+  line-height:1.45;
+  margin-top:5px;
+">
+Los votos muestran una asociación positiva con los ingresos, aunque con
+una dispersión considerable entre películas.
+</div>
+
+</div>
+
+<div style="
+  flex:1;
+  padding:14px 16px;
+  background:#F8FAFC;
+  border-radius:8px;
+  border-left:4px solid #00366D;
+">
+
+<div style="
+  font-size:13px;
+  font-weight:700;
+  color:#00366D;
+">
+Relaciones débiles
+</div>
+
+<div style="
+  font-size:12px;
+  color:#475569;
+  line-height:1.45;
+  margin-top:5px;
+">
+La calificación promedio y la duración muestran poca asociación con los
+ingresos dentro de la muestra.
+</div>
+
+</div>
+
+</div>
+
+Row
+-------------------------------------
+### {.no-title}
+<div style="
+  background:#001B3E;
+  color:white;
+  padding:18px 22px;
+  border-radius:10px;
+  margin-top:20px;
+">
+
+<div style="
+  font-size:20px;
+  font-weight:700;
+">
+Principales hallazgos del análisis exploratorio
+</div>
+
+<div style="
+  font-size:13px;
+  color:#E8C873;
+  margin-top:5px;
+">
+La evidencia exploratoria identifica múltiples factores asociados con el desempeño comercial.
+</div>
+
+Row
+-------------------------------------
+### {.no-title}
+
+<div style="display:flex; gap:12px; margin-top:12px;">
+
+<div style="
+  flex:1;
+  padding:16px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-top:4px solid #00366D;
+">
+
+<div style="font-size:14px;font-weight:700;color:#00366D;">
+01 · Inversión
+</div>
+
+<div style="font-size:12.5px;line-height:1.5;color:#475569;margin-top:7px;">
+El presupuesto presenta la asociación positiva más importante con los
+ingresos dentro de las variables numéricas analizadas.
+</div>
+
+</div>
+
+
+<div style="
+  flex:1;
+  padding:16px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-top:4px solid #C69A2F;
+">
+
+<div style="font-size:14px;font-weight:700;color:#00366D;">
+02 · Audiencia
+</div>
+
+<div style="font-size:12.5px;line-height:1.5;color:#475569;margin-top:7px;">
+Los votos y la popularidad muestran asociaciones positivas con los
+ingresos, aunque con mayor dispersión que el presupuesto.
+</div>
+
+</div>
+
+
+<div style="
+  flex:1;
+  padding:16px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-top:4px solid #00366D;
+">
+
+<div style="font-size:14px;font-weight:700;color:#00366D;">
+03 · Contenido
+</div>
+
+<div style="font-size:12.5px;line-height:1.5;color:#475569;margin-top:7px;">
+El análisis por género, idioma, palabras clave y franquicia muestra que
+las características de contenido también presentan patrones diferenciados
+en el desempeño comercial.
+</div>
+
+</div>
+
+
+<div style="
+  flex:1;
+  padding:16px;
+  background:#F8FAFC;
+  border-radius:9px;
+  border-top:4px solid #C69A2F;
+">
+
+<div style="font-size:14px;font-weight:700;color:#00366D;">
+04 · Rentabilidad
+</div>
+
+<div style="font-size:12.5px;line-height:1.5;color:#475569;margin-top:7px;">
+La rentabilidad no depende únicamente del nivel de ingresos: el retorno
+también está condicionado por la inversión necesaria para producir cada película.
+</div>
+
+</div>
+
+</div>
+
+</div>
+
+
+Row
+-------------------------------------
+### {.no-title}
+
+<div style="
+  margin-top:16px;
+  padding:16px 20px;
+  background:#F8FAFC;
+  border:1px solid #E2E8F0;
+  border-radius:9px;
+">
+
+<div style="
+  font-size:14px;
+  font-weight:700;
+  color:#00366D;
+  margin-bottom:6px;
+">
+Del análisis exploratorio al modelo
+</div>
+
+<div style="
+  font-size:12.5px;
+  line-height:1.5;
+  color:#475569;
+">
+Los patrones identificados sugieren que el desempeño económico de una
+película está relacionado con una combinación de variables financieras,
+de audiencia y de contenido. Estos resultados sirven como punto de partida
+para seleccionar variables y construir un modelo de predicción de rentabilidad,
+cuya capacidad explicativa deberá evaluarse posteriormente con métricas de desempeño.
+</div>
+
+</div>
+
+Enfoque {data-navmenu="Modelado"}
+=====================================
+
+<style>
+.step-header-modelo {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-top:20px;
+  margin-bottom:10px;
+}
+.step-circle-modelo {
+  width:34px;
+  height:34px;
+  border-radius:50%;
+  background:#00366D;
+  color:white;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight:700;
+  font-size:16px;
+  flex-shrink:0;
+}
+.step-text-modelo {
+  font-size:18px;
+  font-weight:700;
+  color:#00366D;
+}
+.note-card-modelo {
+  padding:14px 16px;
+  background:#F4F6F8;
+  border-left:4px solid #5B8FF9;
+  border-radius:6px;
+  font-size:13px;
+}
+.insight-card-modelo {
+  padding:18px;
+  background:#F4F6F8;
+  border-radius:7px;
+  min-height:118px;
+}
+.insight-title-modelo {
+  color:#00366D;
+  font-weight:700;
+  font-size:13px;
+  text-transform:uppercase;
+  letter-spacing:.4px;
+}
+.insight-value-modelo {
+  color:#001B3E;
+  font-size:23px;
+  font-weight:800;
+  margin:8px 0 4px 0;
+}
+</style>
+
+Row
+-------------------------------------
+
+### Enfoque de modelado
+
+El objetivo del modelado es estimar los **ingresos de taquilla** a partir de las características disponibles de cada película y evaluar cuánto valor aportan frente a una predicción simple de referencia.
+
+Se comparan tres enfoques: un **modelo base (benchmark)** que asigna a todas las películas el ingreso promedio del conjunto de entrenamiento, una **Regresión Lineal múltiple** que utiliza todas las variables preparadas y permite interpretar la dirección de sus asociaciones, y un **Random Forest** que utiliza los mismos predictores y puede capturar relaciones no lineales e interacciones más complejas.
+
+
+Row {data-height=125}
+-------------------------------------
+
+### Variable objetivo
+```{r enfoque-target}
+valueBox("Ingresos", caption = "Variable objetivo", icon = "fa-bullseye", color = azul_unam)
+```
+
+### Train / Test
+```{r enfoque-split}
+valueBox("80% / 20%", caption = "Entrenamiento / Prueba", icon = "fa-random", color = azul_claro)
+```
+
+### Semilla
+```{r enfoque-seed}
+valueBox("42", caption = "Se utiliza una semilla fija", icon = "fa-repeat", color = azul_unam)
+```
+
+
+
+### Rentabilidad
+```{r enfoque-roi}
+valueBox("ROI > 2.5", caption = "Umbral de rentabilidad", icon = "fa-dollar-sign", color = azul_unam)
+```
+
+Row
+-------------------------------------
+
+### Del benchmark a la interpretación
+
+<div style="display:grid; grid-template-columns:1fr 1.2fr 1.2fr; gap:18px; margin-top:8px;">
+
+<div class="insight-card-modelo" style="border-top:4px solid #C69A2F;">
+<div class="insight-title-modelo">Benchmark</div>
+<div class="insight-value-modelo">Promedio</div>
+<span style="font-size:13px;">Referencia mínima: predice para todas las películas el promedio de <code>log_ingresos</code> observado en TRAIN.</span>
+</div>
+
+<div class="insight-card-modelo" style="border-top:4px solid #00366D;">
+<div class="insight-title-modelo">Regresión Lineal</div>
+<div class="insight-value-modelo">Interpretabilidad</div>
+<span style="font-size:13px;">Estima asociaciones simultáneas entre las características y los ingresos. Los coeficientes permiten observar dirección y magnitud dentro del modelo.</span>
+</div>
+
+<div class="insight-card-modelo" style="border-top:4px solid #5B8FF9;">
+<div class="insight-title-modelo">Random Forest</div>
+<div class="insight-value-modelo">No linealidad</div>
+<span style="font-size:13px;">Consiste en construir un gran número de árboles de decisión donde cada árbol se entrena con una muestra aleatoria de los datos, y el resultado final se obtiene agregando las predicciones de todos los árboles.</span>
+</div>
+
+</div>
+
+Preparación {data-navmenu="Modelado"}
+=====================================
+
+```{r, include=FALSE}
+
+# 1. Crear la base que utilizaremos para modelar
+df_modelo <- df_analisis %>%
+  mutate(
+    
+    # Variables obtenidas de la fecha de estreno
+    anio_estreno = as.integer(format(fecha_estreno, "%Y")),
+    mes_estreno = as.integer(format(fecha_estreno, "%m")),
+    
+    # Transformaciones logarítmicas, se utilizan porque estas variables presentan distribuciones muy asimétricas
+    log_ingresos = log10(ingresos),
+    log_presupuesto = log10(presupuesto),
+    log_popularidad = log10(popularidad),
+    log_num_votos = log10(num_votos),
+    
+    # Clasificación real de rentabilidad
+    # Se utilizará al final para comparar con la predicción
+    rentable_real = ifelse(
+      roi > 2.5,
+      "Rentable",
+      "No rentable"
+    )
+  )
+
+
+# Seleccion de variables
+
+datos_modelo <- df_modelo %>%
+  select(
+    
+    # Identificación
+    id,
+    titulo,
+    
+    # Valores reales que utilizaremos para evaluar
+    # las predicciones al final
+    ingresos,
+    presupuesto,
+    roi,
+    rentable_real,
+    
+    # Variable objetivo del modelo
+    log_ingresos,
+    
+    # Variables numéricas
+    log_presupuesto,
+    log_popularidad,
+    tiempo_duracion,
+    calif_promedio,
+    log_num_votos,
+    
+    # Variables generales
+    franquicia,
+    anio_estreno,
+    mes_estreno,
+    lenguaje,
+    
+    # Variables de contenido y producción
+    generos,
+    director,
+    top_actores,
+    productoras,
+    paises_productoras,
+    palabras_clave
+  )
+
+
+# Revisamos la estructura
+glimpse(datos_modelo)
+
+
+#Division de los datos, 80/20
+
+set.seed(42)
+
+# Número de observaciones que formarán el entrenamiento
+n_entrenamiento <- floor(0.80 * nrow(datos_modelo))
+
+# Selección aleatoria de las películas de entrenamiento
+indices_entrenamiento <- sample(
+  seq_len(nrow(datos_modelo)),
+  size = n_entrenamiento
+)
+
+# 80% entrenamiento
+datos_entrenamiento <- datos_modelo[
+  indices_entrenamiento,
+]
+
+# 20% prueba
+datos_prueba <- datos_modelo[
+  -indices_entrenamiento,
+]
+
+
+# Revisamos la división
+cat(
+  "Total de películas:",
+  nrow(datos_modelo),
+  "\n"
+)
+
+cat(
+  "Películas de entrenamiento:",
+  nrow(datos_entrenamiento),
+  "\n"
+)
+
+cat(
+  "Películas de prueba:",
+  nrow(datos_prueba),
+  "\n\n"
+)
+
+
+# Revisamos que la proporción de películas rentables y no rentables sea parecida
+cat(
+  "Proporción en entrenamiento:\n"
+)
+
+print(
+  prop.table(
+    table(datos_entrenamiento$rentable_real)
+  )
+)
+
+cat(
+  "\nProporción en prueba:\n"
+)
+
+print(
+  prop.table(
+    table(datos_prueba$rentable_real)
+  )
+)
+
+
+# Esta función servirá para géneros, actores, productoras, países y palabras clave
+
+contar_elementos <- function(datos, variable) {
+  
+  datos %>%
+    
+    select({{ variable }}) %>%
+    
+    # Quitamos valores faltantes
+    filter(!is.na({{ variable }})) %>%
+    
+    # Separamos los elementos que vienen unidos por comas
+    separate_rows(
+      {{ variable }},
+      sep = ","
+    ) %>%
+    
+    # Eliminamos espacios antes y después del texto
+    mutate(
+      valor = trimws({{ variable }})
+    ) %>%
+    
+    # Quitamos posibles cadenas vacías
+    filter(valor != "") %>%
+    
+    # Contamos la frecuencia
+    count(
+      valor,
+      sort = TRUE
+    )
+}
+
+
+#Generos mas frecuentes
+
+frecuencia_generos <- contar_elementos(
+  datos_entrenamiento,
+  generos
+)
+
+top_generos <- frecuencia_generos %>%
+  slice_head(n = 20) %>%
+  pull(valor)
+
+
+#   Directrores mas frecuentes
+
+frecuencia_directores <- datos_entrenamiento %>%
+  
+  filter(!is.na(director)) %>%
+  
+  count(
+    director,
+    sort = TRUE
+  )
+
+top_directores <- frecuencia_directores %>%
+  slice_head(n = 30) %>%
+  pull(director)
+
+
+#Actores mas frecuentes
+
+frecuencia_actores <- contar_elementos(
+  datos_entrenamiento,
+  top_actores
+)
+
+top_actores_modelo <- frecuencia_actores %>%
+  slice_head(n = 50) %>%
+  pull(valor)
+
+
+# Productoras mas feecuentes
+
+frecuencia_productoras <- contar_elementos(
+  datos_entrenamiento,
+  productoras
+)
+
+top_productoras <- frecuencia_productoras %>%
+  slice_head(n = 50) %>%
+  pull(valor)
+
+
+# Paises productores mas frecuentes
+
+frecuencia_paises <- contar_elementos(
+  datos_entrenamiento,
+  paises_productoras
+)
+
+top_paises <- frecuencia_paises %>%
+  slice_head(n = 15) %>%
+  pull(valor)
+
+
+#Palabras clave mas frecuentes
+
+frecuencia_keywords <- contar_elementos(
+  datos_entrenamiento,
+  palabras_clave
+)
+
+top_keywords <- frecuencia_keywords %>%
+  slice_head(n = 50) %>%
+  pull(valor)
+
+
+```
+
+
+```{r, include=FALSE}
+# CREACIÓN DE VARIABLES PARA EL MODELO
+
+# 1. FUNCIÓN PARA CREAR VARIABLES 0/1
+
+crear_indicadores <- function(datos, variable, categorias, prefijo) {
+  
+  # Guardamos los IDs para conservar todas las películas
+  base_ids <- datos %>%
+    select(id)
+  
+  # Separamos los diferentes elementos de cada película
+  indicadores <- datos %>%
+    select(id, {{ variable }}) %>%
+    filter(!is.na({{ variable }})) %>%
+    
+    separate_rows(
+      {{ variable }},
+      sep = ","
+    ) %>%
+    
+    mutate(
+      valor = trimws({{ variable }})
+    ) %>%
+    
+    # Sólo conservamos las categorías que fueron
+    # seleccionadas previamente usando entrenamiento
+    filter(valor %in% categorias) %>%
+    
+    mutate(
+      indicador = 1
+    ) %>%
+    
+    # Evitamos duplicados dentro de una misma película
+    distinct(id, valor, .keep_all = TRUE) %>%
+    
+    select(
+      id,
+      valor,
+      indicador
+    ) %>%
+    
+    # Convertimos cada categoría en una columna
+    pivot_wider(
+      names_from = valor,
+      values_from = indicador,
+      values_fill = 0,
+      names_prefix = prefijo
+    )
+  
+  # Conservamos también películas que no tengan
+  # ninguna de las categorías seleccionadas
+  resultado <- base_ids %>%
+    left_join(
+      indicadores,
+      by = "id"
+    ) %>%
+    
+    mutate(
+      across(
+        -id,
+        ~replace_na(.x, 0)
+      )
+    )
+  
+  # Nombres válidos para utilizarlos posteriormente
+  names(resultado) <- make.names(
+    names(resultado),
+    unique = TRUE
+  )
+  
+  resultado
+}
+
+
+# 2. GÉNEROS
+
+generos_train <- crear_indicadores(
+  datos_entrenamiento,
+  generos,
+  top_generos,
+  "gen_"
+)
+
+generos_test <- crear_indicadores(
+  datos_prueba,
+  generos,
+  top_generos,
+  "gen_"
+)
+
+# 3. ACTORES
+
+actores_train <- crear_indicadores(
+  datos_entrenamiento,
+  top_actores,
+  top_actores_modelo,
+  "actor_"
+)
+
+actores_test <- crear_indicadores(
+  datos_prueba,
+  top_actores,
+  top_actores_modelo,
+  "actor_"
+)
+
+# 4. PRODUCTORAS
+
+productoras_train <- crear_indicadores(
+  datos_entrenamiento,
+  productoras,
+  top_productoras,
+  "prod_"
+)
+
+productoras_test <- crear_indicadores(
+  datos_prueba,
+  productoras,
+  top_productoras,
+  "prod_"
+)
+
+# 5. PAÍSES PRODUCTORES
+
+
+paises_train <- crear_indicadores(
+  datos_entrenamiento,
+  paises_productoras,
+  top_paises,
+  "pais_"
+)
+
+paises_test <- crear_indicadores(
+  datos_prueba,
+  paises_productoras,
+  top_paises,
+  "pais_"
+)
+
+# 6. PALABRAS CLAVE
+
+keywords_train <- crear_indicadores(
+  datos_entrenamiento,
+  palabras_clave,
+  top_keywords,
+  "key_"
+)
+
+keywords_test <- crear_indicadores(
+  datos_prueba,
+  palabras_clave,
+  top_keywords,
+  "key_"
+)
+
+
+# 7. DIRECTORES
+
+# En director normalmente hay un solo nombre por película, por lo que podemos crear directamente un indicador para cada uno de los directores seleccionados.
+
+crear_directores <- function(datos, directores) {
+  
+  resultado <- datos %>%
+    select(
+      id,
+      director
+    )
+  
+  for (nombre in directores) {
+    
+    nombre_columna <- paste0(
+      "dir_",
+      make.names(nombre)
+    )
+    
+    resultado[[nombre_columna]] <- ifelse(
+      resultado$director == nombre,
+      1,
+      0
+    )
+  }
+  
+  resultado %>%
+    select(-director)
+}
+
+
+directores_train <- crear_directores(
+  datos_entrenamiento,
+  top_directores
+)
+
+directores_test <- crear_directores(
+  datos_prueba,
+  top_directores
+)
+
+
+# 8. IDIOMAS
+
+#Seleccionamos los 10 idiomas más frecuentes utilizando únicamente entrenamiento.
+
+top_idiomas <- datos_entrenamiento %>%
+  count(
+    lenguaje,
+    sort = TRUE
+  ) %>%
+  slice_head(n = 10) %>%
+  pull(lenguaje)
+
+
+# Los idiomas fuera del top 10 se agrupan como "Otro"
+
+datos_entrenamiento <- datos_entrenamiento %>%
+  mutate(
+    lenguaje_modelo = ifelse(
+      lenguaje %in% top_idiomas,
+      lenguaje,
+      "Otro"
+    ),
+    
+    lenguaje_modelo = factor(
+      lenguaje_modelo
+    )
+  )
+
+
+datos_prueba <- datos_prueba %>%
+  mutate(
+    lenguaje_modelo = ifelse(
+      lenguaje %in% top_idiomas,
+      lenguaje,
+      "Otro"
+    ),
+    
+    lenguaje_modelo = factor(
+      lenguaje_modelo,
+      levels = levels(
+        datos_entrenamiento$lenguaje_modelo
+      )
+    )
+  )
+
+
+# 9. CONSTRUCCIÓN DE LAS BASES FINALES
+
+train_final <- datos_entrenamiento %>%
+  
+  # Eliminamos los textos originales que ya fueron transformados a variables indicadoras
+  select(
+    -generos,
+    -director,
+    -top_actores,
+    -productoras,
+    -paises_productoras,
+    -palabras_clave,
+    -lenguaje
+  ) %>%
+  
+  left_join(
+    generos_train,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    actores_train,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    directores_train,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    productoras_train,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    paises_train,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    keywords_train,
+    by = "id"
+  )
+
+
+test_final <- datos_prueba %>%
+  
+  select(
+    -generos,
+    -director,
+    -top_actores,
+    -productoras,
+    -paises_productoras,
+    -palabras_clave,
+    -lenguaje
+  ) %>%
+  
+  left_join(
+    generos_test,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    actores_test,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    directores_test,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    productoras_test,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    paises_test,
+    by = "id"
+  ) %>%
+  
+  left_join(
+    keywords_test,
+    by = "id"
+  )
+
+
+```
+
+```{r, include=FALSE}
+
+# CORRECCIÓN DE COLUMNAS ENTRE ENTRENAMIENTO Y PRUEBA
+
+# Revisamos qué columnas existen en entrenamiento pero no aparecen en prueba
+columnas_faltantes_test <- setdiff(
+  names(train_final),
+  names(test_final)
+)
+
+
+# Creamos esas columnas en prueba con valor 0 porque ninguna película de prueba contiene esa característica
+for (columna in columnas_faltantes_test) {
+  test_final[[columna]] <- 0
+}
+
+
+# Por seguridad revisamos si hubiera alguna columna en prueba que no exista en entrenamiento
+columnas_extra_test <- setdiff(
+  names(test_final),
+  names(train_final)
+)
+
+
+
+# Si hubiera alguna, la eliminamos
+if (length(columnas_extra_test) > 0) {
+  
+  test_final <- test_final %>%
+    select(
+      -all_of(columnas_extra_test)
+    )
+}
+
+
+# Ordenamos las columnas de prueba exactamente en el mismo orden que entrenamiento
+test_final <- test_final[
+  ,
+  names(train_final)
+]
+
+
+```
+
+
+```{r, include=FALSE}
+
+# PRIMER MODELO SUPERVISADO: REGRESIÓN LINEAL
+
+# 1. BASES EXCLUSIVAS PARA EL MODELO
+
+# Quitamos las variables que solamente utilizaremos para identificar películas o evaluar resultados al final
+
+train_modelo <- train_final %>%
+  select(
+    -id,
+    -titulo,
+    -ingresos,
+    -presupuesto,
+    -roi,
+    -rentable_real
+  )
+
+test_modelo <- test_final %>%
+  select(
+    -id,
+    -titulo,
+    -ingresos,
+    -presupuesto,
+    -roi,
+    -rentable_real
+  )
+
+
+# 2. FUNCIÓN PARA CALCULAR MÉTRICAS
+
+
+metricas_regresion <- function(real, predicho) {
+  
+  mse <- mean(
+    (real - predicho)^2
+  )
+  
+  rmse <- sqrt(mse)
+  
+  mae <- mean(
+    abs(real - predicho)
+  )
+  
+  r2 <- 1 - (
+    sum((real - predicho)^2) /
+      sum((real - mean(real))^2)
+  )
+  
+  data.frame(
+    MSE = mse,
+    RMSE = rmse,
+    MAE = mae,
+    R2 = r2
+  )
+}
+
+
+# 3. MODELO BASE
+
+# Antes de construir un modelo complejo creamos una predicción de referencia.
+# El modelo base simplemente predice para todas las películas el ingreso logarítmico promedio del conjunto de entrenamiento.
+
+media_log_ingresos <- mean(
+  train_modelo$log_ingresos
+)
+
+pred_baseline <- rep(
+  media_log_ingresos,
+  nrow(test_modelo)
+)
+
+
+metricas_baseline <- metricas_regresion(
+  test_modelo$log_ingresos,
+  pred_baseline
+)
+
+metricas_baseline$Modelo <- "Modelo base"
+
+
+# 4. REGRESIÓN LINEAL MÚLTIPLE
+
+
+# El modelo utiliza simultáneamente todas las características preparadas previamente.
+
+modelo_lineal <- lm(
+  log_ingresos ~ .,
+  data = train_modelo
+)
+
+
+# 5. PREDICCIONES SOBRE PELÍCULAS NO VISTAS
+
+pred_lineal_log <- predict(
+  modelo_lineal,
+  newdata = test_modelo
+)
+
+
+# 6. EVALUACIÓN DEL MODELO
+
+metricas_lineal <- metricas_regresion(
+  test_modelo$log_ingresos,
+  pred_lineal_log
+)
+
+metricas_lineal$Modelo <- "Regresión lineal"
+
+
+# Unimos los resultados para compararlos
+comparacion_modelos <- bind_rows(
+  metricas_baseline,
+  metricas_lineal
+) %>%
+  select(
+    Modelo,
+    MSE,
+    RMSE,
+    MAE,
+    R2
+  )
+
+
+# 7. REGRESAMOS LA PREDICCIÓN A DÓLARES
+
+
+# Como el modelo predijo log10(ingresos), utilizamos 10^x para volver a ingresos en dólares.
+
+ingresos_pred_lineal <- 10^pred_lineal_log
+
+
+# Creamos una base con los resultados película por película
+
+resultados_lineal <- test_final %>%
+  mutate(
+    
+    ingreso_predicho = ingresos_pred_lineal,
+    
+    error_ingresos = ingreso_predicho - ingresos,
+    
+    error_absoluto = abs(
+      ingreso_predicho - ingresos
+    )
+  )
+
+
+```
+
+```{r, include=FALSE}
+# COEFICIENTES DEL MODELO LINEAL
+
+coef_lineal <- as.data.frame(
+  summary(modelo_lineal)$coefficients
+)
+
+coef_lineal$variable <- rownames(coef_lineal)
+
+coef_lineal <- coef_lineal %>%
+  rename(
+    coeficiente = Estimate,
+    error_estandar = `Std. Error`,
+    t = `t value`,
+    p_value = `Pr(>|t|)`
+  ) %>%
+  filter(variable != "(Intercept)") %>%
+  mutate(
+    magnitud = abs(coeficiente)
+  ) %>%
+  arrange(desc(magnitud))
+
+top_coef_lineal <- coef_lineal %>%
+  slice_head(n = 25)
+
+```
+
+```{r, include=FALSE}
+# COEFICIENTES MÁS RELEVANTES DE LA REGRESIÓN LINEAL
+
+top_coef_grafica <- coef_lineal %>%
+  filter(p_value < 0.05) %>%
+  slice_max(
+    order_by = magnitud,
+    n = 15
+  ) %>%
+  mutate(
+    direccion = ifelse(
+      coeficiente > 0,
+      "Asociación positiva",
+      "Asociación negativa"
+    ),
+    
+    variable = gsub("_", " ", variable),
+    variable = gsub("\\.", " ", variable)
+  )
+
+
+ggplot(
+  top_coef_grafica,
+  aes(
+    x = coeficiente,
+    y = reorder(variable, magnitud),
+    fill = direccion
+  )
+) +
+  geom_col(
+    width = 0.72
+  ) +
+  geom_vline(
+    xintercept = 0,
+    color = "#1F3C88",
+    linewidth = 0.6
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Asociación positiva" = "#2F6BFF",
+      "Asociación negativa" = "#9DBEFF"
+    )
+  ) +
+  labs(
+    title = "Principales asociaciones con los ingresos",
+    subtitle = "Coeficientes significativos de la regresión lineal",
+    x = "Coeficiente",
+    y = "",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold",
+      color = "#1F3C88",
+      size = 15
+    ),
+    plot.subtitle = element_text(
+      hjust = 0.5,
+      color = "gray35"
+    ),
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+```
+
+
+```{r, include=FALSE}
+# SEGUNDO MODELO SUPERVISADO: RANDOM FOREST
+
+
+# 1. ENTRENAMIENTO DEL MODELO
+
+set.seed(42)
+
+modelo_rf <- randomForest(
+  log_ingresos ~ .,
+  data = train_modelo,
+  ntree = 500,
+  importance = TRUE
+)
+
+
+# Revisamos información general del modelo
+print(modelo_rf)
+
+
+# 2. PREDICCIONES SOBRE EL CONJUNTO DE PRUEBA
+
+pred_rf_log <- predict(
+  modelo_rf,
+  newdata = test_modelo
+)
+
+
+# 3. EVALUACIÓN DEL RANDOM FOREST
+
+
+metricas_rf <- metricas_regresion(
+  test_modelo$log_ingresos,
+  pred_rf_log
+)
+
+metricas_rf$Modelo <- "Random Forest"
+
+
+# 4. COMPARACIÓN DE LOS TRES MODELOS
+
+comparacion_modelos <- bind_rows(
+  metricas_baseline,
+  metricas_lineal,
+  metricas_rf
+) %>%
+  select(
+    Modelo,
+    MSE,
+    RMSE,
+    MAE,
+    R2
+  )
+
+
+
+
+# 5. REGRESAMOS LA PREDICCIÓN A DÓLARES
+
+
+ingresos_pred_rf <- 10^pred_rf_log
+
+
+# Guardamos resultados película por película
+resultados_rf <- test_final %>%
+  mutate(
+    ingreso_predicho = ingresos_pred_rf,
+    
+    error_ingresos = ingreso_predicho - ingresos,
+    
+    error_absoluto = abs(
+      ingreso_predicho - ingresos
+    )
+  )
+
+# 6. ALGUNAS PREDICCIONES DEL RANDOM FOREST
+
+resultados_rf %>%
+  select(
+    titulo,
+    ingresos,
+    ingreso_predicho,
+    presupuesto,
+    roi
+  ) %>%
+  mutate(
+    ingresos = round(ingresos),
+    ingreso_predicho = round(ingreso_predicho)
+  ) %>%
+  slice_head(n = 15)
+
+```
+
+
+```{r, include=FALSE}
+# IMPORTANCIA DE VARIABLES
+
+importancia_rf <- as.data.frame(
+  importance(modelo_rf)
+)
+
+importancia_rf$variable <- rownames(
+  importancia_rf
+)
+
+# Ordenamos por aumento del error al quitar información
+importancia_rf <- importancia_rf %>%
+  arrange(
+    desc(`%IncMSE`)
+  )
+
+# Mostramos las 25 variables más importantes
+top_importancia <- importancia_rf %>%
+  slice_head(n = 25)
+
+```
+
+```{r, include=FALSE}
+
+# EVALUACIÓN FINAL:
+# INGRESOS PREDICHOS -> ROI -> RENTABILIDAD
+
+
+# 1. COMPROBACIÓN
+
+
+# Debe existir una predicción para cada película de prueba
+stopifnot(
+  length(pred_rf_log) == nrow(test_final)
+)
+
+
+# 2. RESULTADOS PELÍCULA POR PELÍCULA
+
+
+resultados_finales <- test_final %>%
+  mutate(
+    
+    # Predicción del Random Forest en dólares
+    ingreso_predicho = 10^pred_rf_log,
+    
+    # ROI estimado a partir del ingreso predicho
+    roi_predicho = ingreso_predicho / presupuesto,
+    
+    # Rentabilidad estimada
+    rentable_predicho = ifelse(
+      roi_predicho > 2.5,
+      "Rentable",
+      "No rentable"
+    ),
+    
+    # Error absoluto de ingresos
+    error_ingresos = abs(
+      ingresos - ingreso_predicho
+    ),
+    
+    # Error absoluto de ROI
+    error_roi = abs(
+      roi - roi_predicho
+    )
+  )
+
+
+# 3. TABLA DE RESULTADOS
+
+tabla_resultados <- resultados_finales %>%
+  select(
+    titulo,
+    presupuesto,
+    ingresos,
+    ingreso_predicho,
+    roi,
+    roi_predicho,
+    rentable_real,
+    rentable_predicho
+  ) %>%
+  mutate(
+    ingreso_predicho = round(ingreso_predicho, 0),
+    roi_predicho = round(roi_predicho, 2)
+  )
+
+
+```
+
+```{r, include=FALSE}
+# RANGOS DE ROI
+
+# Se parte de los resultados finales válidos antes de construir los rangos.
+# Esto evita depender de un objeto creado en una ejecución previa del entorno.
+resultados_validos <- resultados_finales %>%
+  filter(
+    !is.na(ingreso_predicho),
+    !is.na(roi_predicho),
+    !is.na(rentable_real),
+    !is.na(rentable_predicho)
+  ) %>%
+  mutate(
+    
+    rango_roi_real = cut(
+      roi,
+      breaks = c(-Inf, 1, 2.5, 5, 10, Inf),
+      labels = c(
+        "Menor a 1",
+        "1 a 2.5",
+        "2.5 a 5",
+        "5 a 10",
+        "Mayor a 10"
+      )
+    ),
+    
+    rango_roi_predicho = cut(
+      roi_predicho,
+      breaks = c(-Inf, 1, 2.5, 5, 10, Inf),
+      labels = c(
+        "Menor a 1",
+        "1 a 2.5",
+        "2.5 a 5",
+        "5 a 10",
+        "Mayor a 10"
+      )
+    )
+  )
+
+
+tabla_rangos <- bind_rows(
+  
+  resultados_validos %>%
+    count(rango_roi_real) %>%
+    transmute(
+      rango = rango_roi_real,
+      cantidad = n,
+      tipo = "ROI real"
+    ),
+  
+  resultados_validos %>%
+    count(rango_roi_predicho) %>%
+    transmute(
+      rango = rango_roi_predicho,
+      cantidad = n,
+      tipo = "ROI estimado"
+    )
+)
+```
+
+
+```{r, include=FALSE}
+# ERROR PELÍCULA POR PELÍCULA
+
+resultados_validos <- resultados_validos %>%
+  mutate(
+    
+    error_log = abs(
+      log10(ingresos) -
+      log10(ingreso_predicho)
+    ),
+    
+    clasificacion_correcta = ifelse(
+      rentable_real == rentable_predicho,
+      "Acierto",
+      "Error"
+    )
+  )
+```
+
+
+```{r, include=FALSE}
+# Cinco películas donde mejor predijo
+mejores_predicciones <- resultados_validos %>%
+  arrange(error_log) %>%
+  slice_head(n = 5)
+
+# Cinco películas donde más se equivocó
+peores_predicciones <- resultados_validos %>%
+  arrange(desc(error_log)) %>%
+  slice_head(n = 5)
+
+casos_modelo <- bind_rows(
+  mejores_predicciones,
+  peores_predicciones
+) %>%
+  distinct(id, .keep_all = TRUE)
+```
+
+```{r, include=FALSE}
+
+# EJEMPLOS DE PREDICCIONES
+
+casos_ingresos <- casos_modelo %>%
+  select(
+    titulo,
+    ingresos,
+    ingreso_predicho
+  ) %>%
+  pivot_longer(
+    cols = c(
+      ingresos,
+      ingreso_predicho
+    ),
+    names_to = "tipo",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    tipo = recode(
+      tipo,
+      ingresos = "Ingreso real",
+      ingreso_predicho = "Ingreso estimado"
+    )
+  )
+
+
+```
+
+
+
+
+```{r modelo-dashboard-helpers, include=FALSE}
+# ------------------------------------------------------------------
+# OBJETOS AUXILIARES PARA VISUALIZACIÓN
+# No cambian la preparación ni el entrenamiento de los modelos.
+# ------------------------------------------------------------------
+
+limpiar_nombre_variable <- function(x) {
+  x <- gsub("^log_presupuesto$", "Presupuesto (log10)", x)
+  x <- gsub("^log_popularidad$", "Popularidad (log10)", x)
+  x <- gsub("^log_num_votos$", "Número de votos (log10)", x)
+  x <- gsub("^anio_estreno$", "Año de estreno", x)
+  x <- gsub("^mes_estreno$", "Mes de estreno", x)
+  x <- gsub("^tiempo_duracion$", "Duración", x)
+  x <- gsub("^calif_promedio$", "Calificación promedio", x)
+  x <- gsub("^franquicia", "Franquicia: ", x)
+  x <- gsub("^lenguaje_modelo", "Idioma: ", x)
+  x <- gsub("^gen_", "Género: ", x)
+  x <- gsub("^actor_", "Actor: ", x)
+  x <- gsub("^dir_", "Director: ", x)
+  x <- gsub("^prod_", "Productora: ", x)
+  x <- gsub("^pais_", "País: ", x)
+  x <- gsub("^key_", "Palabra clave: ", x)
+  x <- gsub("\\.", " ", x)
+  x <- gsub("_", " ", x)
+  trimws(x)
+}
+
+# Métricas dinámicas para tarjetas e insights.
+modelo_mejor <- comparacion_modelos %>%
+  filter(Modelo != "Modelo base") %>%
+  slice_max(order_by = R2, n = 1, with_ties = FALSE)
+
+rmse_mejor <- modelo_mejor$RMSE[1]
+mejora_rmse_vs_base <- 1 - (rmse_mejor / metricas_baseline$RMSE)
+
+# Coeficientes para interpretación de la regresión ya entrenada.
+coef_lineal_dashboard <- coef_lineal %>%
+  mutate(
+    variable_limpia = limpiar_nombre_variable(variable),
+    direccion = ifelse(coeficiente >= 0, "Asociación positiva", "Asociación negativa")
+  )
+
+top_coef_dashboard <- coef_lineal_dashboard %>%
+  filter(!is.na(p_value), p_value < 0.05) %>%
+  slice_max(order_by = magnitud, n = 15, with_ties = FALSE)
+
+# Importancia de Random Forest con nombres legibles.
+importancia_rf_dashboard <- importancia_rf %>%
+  mutate(variable_limpia = limpiar_nombre_variable(variable))
+
+top_importancia_dashboard <- importancia_rf_dashboard %>%
+  slice_head(n = 15)
+
+principal_driver_rf <- top_importancia_dashboard$variable_limpia[1]
+
+# Comparación de ingresos reales y predichos en dólares por nivel de taquilla.
+datos_taquilla_modelos <- tibble(
+  ingreso_real = test_final$ingresos,
+  regresion_lineal = 10^pred_lineal_log,
+  random_forest = 10^pred_rf_log
+) %>%
+  filter(
+    is.finite(ingreso_real),
+    is.finite(regresion_lineal),
+    is.finite(random_forest),
+    ingreso_real > 0,
+    regresion_lineal > 0,
+    random_forest > 0
+  ) %>%
+  mutate(
+    grupo_num = ntile(ingreso_real, 5),
+    nivel_taquilla = factor(
+      grupo_num,
+      levels = 1:5,
+      labels = c("Muy baja", "Baja", "Media", "Alta", "Muy alta")
+    )
+  )
+
+comparacion_taquilla <- datos_taquilla_modelos %>%
+  group_by(nivel_taquilla) %>%
+  summarise(
+    `Ingreso real` = median(ingreso_real, na.rm = TRUE),
+    `Regresión Lineal` = median(regresion_lineal, na.rm = TRUE),
+    `Random Forest` = median(random_forest, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(`Ingreso real`, `Regresión Lineal`, `Random Forest`),
+    names_to = "Serie",
+    values_to = "Ingreso"
+  )
+
+# Evaluación de rentabilidad a partir de las predicciones de Random Forest.
+resultados_dashboard <- resultados_finales %>%
+  filter(
+    !is.na(ingreso_predicho),
+    !is.na(roi_predicho),
+    !is.na(rentable_real),
+    !is.na(rentable_predicho)
+  ) %>%
+  mutate(
+    rentable_real = factor(rentable_real, levels = c("No rentable", "Rentable")),
+    rentable_predicho = factor(rentable_predicho, levels = c("No rentable", "Rentable"))
+  )
+
+matriz_rentabilidad <- table(
+  Real = resultados_dashboard$rentable_real,
+  Predicho = resultados_dashboard$rentable_predicho
+)
+
+TP <- matriz_rentabilidad["Rentable", "Rentable"]
+TN <- matriz_rentabilidad["No rentable", "No rentable"]
+FP <- matriz_rentabilidad["No rentable", "Rentable"]
+FN <- matriz_rentabilidad["Rentable", "No rentable"]
+
+safe_div <- function(a, b) ifelse(b == 0, NA_real_, a / b)
+accuracy <- safe_div(TP + TN, sum(matriz_rentabilidad))
+precision <- safe_div(TP, TP + FP)
+recall <- safe_div(TP, TP + FN)
+f1 <- safe_div(2 * precision * recall, precision + recall)
+
+niveles_roi <- c("Menor a 1", "1 a 2.5", "2.5 a 5", "5 a 10", "Mayor a 10")
+
+resultados_dashboard <- resultados_dashboard %>%
+  mutate(
+    rango_roi_real = cut(
+      roi,
+      breaks = c(-Inf, 1, 2.5, 5, 10, Inf),
+      labels = niveles_roi
+    ),
+    rango_roi_predicho = cut(
+      roi_predicho,
+      breaks = c(-Inf, 1, 2.5, 5, 10, Inf),
+      labels = niveles_roi
+    ),
+    error_log = abs(log10(pmax(ingresos, 1)) - log10(pmax(ingreso_predicho, 1)))
+  )
+
+tabla_rangos_dashboard <- bind_rows(
+  resultados_dashboard %>%
+    count(rango_roi_real) %>%
+    transmute(rango = rango_roi_real, cantidad = n, tipo = "ROI real"),
+  resultados_dashboard %>%
+    count(rango_roi_predicho) %>%
+    transmute(rango = rango_roi_predicho, cantidad = n, tipo = "ROI estimado")
+) %>%
+  mutate(rango = factor(rango, levels = niveles_roi))
+
+casos_dashboard <- bind_rows(
+  resultados_dashboard %>% arrange(error_log) %>% slice_head(n = 5),
+  resultados_dashboard %>% arrange(desc(error_log)) %>% slice_head(n = 5)
+) %>%
+  distinct(id, .keep_all = TRUE)
+
+casos_ingresos_dashboard <- casos_dashboard %>%
+  select(titulo, ingresos, ingreso_predicho) %>%
+  pivot_longer(
+    cols = c(ingresos, ingreso_predicho),
+    names_to = "tipo",
+    values_to = "valor"
+  ) %>%
+  mutate(
+    tipo = recode(
+      tipo,
+      ingresos = "Ingreso real",
+      ingreso_predicho = "Ingreso estimado"
+    )
+  )
+```
+
+Row {data-height=210}
+-------------------------------------
+
+### Paso 1 · Separación Train / Test
+
+Los datos se separan **antes de seleccionar categorías**, por lo que las decisiones de preparación se toman únicamente con el conjunto de entrenamiento.
+
+<div style="display:flex; gap:16px; margin:10px 0 4px 0; flex-wrap:wrap;">
+  <div class="note-card-modelo" style="flex:1;"><strong>TRAIN · 80%</strong><br>Preparación, selección de categorías y entrenamiento.</div>
+  <div class="note-card-modelo" style="flex:1; border-left-color:#C69A2F;"><strong>TEST · 20%</strong><br>Evaluación final con películas no utilizadas para entrenar.</div>
+</div>
+
+Row {data-height=105}
+-------------------------------------
+
+### Paso 2 · Transformación de variables
+
+Los **ingresos, presupuesto, popularidad y número de votos** se transforman con logaritmo base 10 para reducir la asimetría y la influencia de valores extremadamente altos.
+
+
+Row {data-height=430}
+-------------------------------------
+
+### Antes · Ingresos originales
+
+```{r prep-transformacion-antes-interactiva}
+
+
+limite_98 <- quantile(
+df_modelo$ingresos,
+probs = 0.98,
+na.rm = TRUE
+)
+datos_antes_vis <- df_modelo %>%
+filter(
+!is.na(ingresos),
+ingresos > 0,
+ingresos <= limite_98
+) %>%
+mutate(
+ingresos_millones = ingresos / 1e6
+)
+mediana_antes <- median(
+datos_antes_vis$ingresos_millones,
+na.rm = TRUE
+)
+plot_ly(
+data = datos_antes_vis,
+x = ~ingresos_millones,
+type = "histogram",
+nbinsx = 35,
+marker = list(
+color = dorado_unam,
+line = list(
+color = "white",
+width = 1
+)
+),
+hovertemplate = paste(
+"Ingresos: $%{x:.1f} M",
+"<br>Películas: %{y}",
+"<extra></extra>"
+)
+) %>%
+layout(
+title = list(
+text = paste0(
+"<b>Distribución original</b>",
+"<br><sup>",
+"Se muestra el 98% inferior para facilitar la lectura",
+"</sup>"
+),
+x = 0.05
+),
+xaxis = list(
+title = "Ingresos (millones USD)",
+zeroline = FALSE
+),
+yaxis = list(
+title = "Películas",
+zeroline = FALSE
+),
+shapes = list(
+list(
+type = "line",
+x0 = mediana_antes,
+x1 = mediana_antes,
+y0 = 0,
+y1 = 1,
+yref = "paper",
+line = list(
+color = azul_oscuro,
+width = 2,
+dash = "dash"
+)
+)
+),
+margin = list(
+l = 60,
+r = 20,
+b = 55,
+t = 70
+)
+) %>%
+config(
+displayModeBar = FALSE
+)
+
+
+```
+
+
+
+### Después · log10(Ingresos)
+
+```{r prep-transformacion-despues-interactiva}
+
+ datos_despues_vis <- df_modelo %>%
+  filter(
+    !is.na(log_ingresos),
+    is.finite(log_ingresos)
+  )
+
+mediana_despues <- median(
+  datos_despues_vis$log_ingresos,
+  na.rm = TRUE
+)
+
+plot_ly(
+  data = datos_despues_vis,
+  x = ~log_ingresos,
+  type = "histogram",
+  nbinsx = 35,
+  marker = list(
+    color = azul_claro,
+    line = list(
+      color = "white",
+      width = 1
+    )
+  ),
+  hovertemplate = paste(
+    "log10(Ingresos): %{x:.2f}",
+    "<br>Películas: %{y}",
+    "<extra></extra>"
+  )
+) %>%
+  layout(
+    title = list(
+      text = paste0(
+        "<b>Distribución transformada</b>",
+        "<br><sup>",
+        "La transformación log10 reduce la asimetría",
+        "</sup>"
+      ),
+      x = 0.05
+    ),
+   
+    xaxis = list(
+      title = "log10(Ingresos)",
+      zeroline = FALSE
+    ),
+   
+    yaxis = list(
+      title = "Películas",
+      zeroline = FALSE
+    ),
+   
+    shapes = list(
+      list(
+        type = "line",
+        x0 = mediana_despues,
+        x1 = mediana_despues,
+        y0 = 0,
+        y1 = 1,
+        yref = "paper",
+        line = list(
+          color = azul_oscuro,
+          width = 2,
+          dash = "dash"
+        )
+      )
+    ),
+   
+    margin = list(
+      l = 60,
+      r = 20,
+      b = 55,
+      t = 70
+    )
+  ) %>%
+  config(
+    displayModeBar = FALSE
+  )
+```
+
+### Paso 3 · Selección de categorías
+
+Para las variables que pueden contener varios elementos por película se conservan las categorías más frecuentes **observadas en TRAIN**. La frecuencia se utiliza únicamente para controlar dimensionalidad; **no equivale a importancia predictiva**.
+
+<div style="display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin:12px 0; text-align:center;">
+  <div class="note-card-modelo"><strong>`r length(top_generos)`</strong><br>Géneros</div>
+  <div class="note-card-modelo"><strong>`r length(top_directores)`</strong><br>Directores</div>
+  <div class="note-card-modelo"><strong>`r length(top_actores_modelo)`</strong><br>Actores</div>
+  <div class="note-card-modelo"><strong>`r length(top_productoras)`</strong><br>Productoras</div>
+  <div class="note-card-modelo"><strong>`r length(top_paises)`</strong><br>Países</div>
+  <div class="note-card-modelo"><strong>`r length(top_keywords)`</strong><br>Palabras clave</div>
+  <div class="note-card-modelo"><strong>TRAIN</strong><br>Define categorías</div>
+  <div class="note-card-modelo"><strong>TEST</strong><br>Solo reutiliza niveles</div>
+</div>
+
+Row {data-height=355}
+-------------------------------------
+
+### Paso 4 · Codificación 0/1
+
+Las categorías seleccionadas se convierten en variables indicadoras binarias.
+Una misma película puede activar varias categorías al mismo tiempo.
+
+ <div style="
+display:grid;
+grid-template-columns:1fr 55px 1.15fr;
+align-items:center;
+gap:18px;
+margin:16px 0;
+">
+<div style="
+background:#F4F6F8;
+border-left:5px solid #00366D;
+border-radius:8px;
+padding:20px;
+">
+<div style="
+color:#00366D;
+font-weight:700;
+font-size:16px;
+margin-bottom:10px;
+">
+Película de ejemplo
+</div>
+<div style="font-size:14px;">
+<strong>Géneros:</strong><br>
+Acción · Aventura · Ciencia ficción
+</div>
+</div>
+<div style="
+text-align:center;
+font-size:30px;
+color:#00366D;
+font-weight:bold;
+">
+&#8594;
+</div>
+<div>
+<div style="
+color:#00366D;
+font-weight:700;
+font-size:15px;
+margin-bottom:8px;
+">
+Variables generadas
+</div>
+<table style="
+width:100%;
+border-collapse:collapse;
+font-size:13px;
+background:white;
+">
+<tr style="background:#00366D; color:white;">
+<th style="text-align:left; padding:8px 12px;">
+Variable
+</th>
+<th style="text-align:center; padding:8px 12px;">
+Valor
+</th>
+</tr>
+<tr>
+<td style="padding:8px 12px; border-bottom:1px solid #ddd;">
+Acción
+</td>
+<td style="text-align:center; border-bottom:1px solid #ddd;">
+<strong>1</strong>
+</td>
+</tr>
+<tr>
+<td style="padding:8px 12px; border-bottom:1px solid #ddd;">
+Aventura
+</td>
+<td style="text-align:center; border-bottom:1px solid #ddd;">
+<strong>1</strong>
+</td>
+</tr>
+<tr>
+<td style="padding:8px 12px; border-bottom:1px solid #ddd;">
+Ciencia ficción
+</td>
+<td style="text-align:center; border-bottom:1px solid #ddd;">
+<strong>1</strong>
+</td>
+</tr>
+<tr>
+<td style="padding:8px 12px;">
+Comedia
+</td>
+<td style="text-align:center;">
+0
+</td>
+</tr>
+</table>
+<div style="
+margin-top:8px;
+font-size:12px;
+color:#666;
+text-align:center;
+">
+<strong>1</strong> = presente
+&nbsp;&nbsp; · &nbsp;&nbsp;
+<strong>0</strong> = ausente
+</div>
+</div>
+</div>
+
+### Paso 5 · Alineación Train / Test
+
+Antes del entrenamiento se comprueba que TRAIN y TEST tengan las mismas variables y el mismo orden. Las categorías ausentes en TEST se representan con 0.
+
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; text-align:center;">
+  <div class="note-card-modelo"><strong>`r ncol(train_modelo) - 1`</strong><br>Predictores en TRAIN</div>
+  <div class="note-card-modelo" style="border-left-color:#5B8FF9;"><strong>`r ncol(test_modelo) - 1`</strong><br>Predictores en TEST</div>
+</div>
+
+
+Modelos y evaluación {data-navmenu="Modelado"}
+=====================================
+
+Row
+-------------------------------------
+
+### Dos modelos supervisados
+
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-bottom:14px;">
+
+<div class="insight-card-modelo" style="border-left:5px solid #00366D;">
+<div class="insight-title-modelo">Regresión Lineal</div>
+<div class="insight-value-modelo">Todas las variables</div>
+<span style="font-size:13px;">Se entrena con todos los predictores preparados</span>
+</div>
+
+<div class="insight-card-modelo" style="border-left:5px solid #5B8FF9;">
+<div class="insight-title-modelo">Random Forest</div>
+<div class="insight-value-modelo">500 árboles</div>
+<span style="font-size:13px;">En cada división se evalúan aleatoriamente <strong>`r modelo_rf$mtry`</strong> de los <strong>`r ncol(train_modelo) - 1`</strong> predictores disponibles.</span>
+</div>
+
+</div>
+
+ Row {data-height=190}
+-------------------------------------
+<div style="
+display:grid;
+grid-template-columns:repeat(3,minmax(0,1fr));
+gap:18px;
+width:100%;
+margin:0 auto;
+">
+
+<div style="
+background:white;
+border-radius:8px;
+border-top:5px solid #E8C873;
+padding:16px 18px;
+box-shadow:0 2px 7px rgba(0,0,0,0.08);
+min-height:140px;
+display:flex;
+flex-direction:column;
+align-items:center;
+justify-content:center;
+text-align:center;
+">
+<div style="
+font-size:16px;
+font-weight:700;
+color:#001B3E;
+margin-bottom:7px;
+">
+Benchmark
+</div>
+<div style="
+font-size:25px;
+font-weight:700;
+color:#C69A2F;
+margin-bottom:10px;
+">
+R² = `r round(metricas_baseline$R2, 3)`
+</div>
+<div style="
+display:flex;
+justify-content:center;
+gap:30px;
+width:100%;
+font-size:13px;
+">
+<div style="text-align:center;">
+<strong>RMSE</strong><br>
+`r round(metricas_baseline$RMSE, 3)`
+</div>
+<div style="text-align:center;">
+<strong>MAE</strong><br>
+`r round(metricas_baseline$MAE, 3)`
+</div>
+</div>
+</div>
+
+<div style="
+background:white;
+border-radius:8px;
+border-top:5px solid #00366D;
+padding:16px 18px;
+box-shadow:0 2px 7px rgba(0,0,0,0.08);
+min-height:140px;
+display:flex;
+flex-direction:column;
+align-items:center;
+justify-content:center;
+text-align:center;
+">
+<div style="
+font-size:16px;
+font-weight:700;
+color:#001B3E;
+margin-bottom:7px;
+">
+Regresión Lineal
+</div>
+<div style="
+font-size:25px;
+font-weight:700;
+color:#00366D;
+margin-bottom:10px;
+">
+R² = `r round(metricas_lineal$R2, 3)`
+</div>
+<div style="
+display:flex;
+justify-content:center;
+gap:30px;
+width:100%;
+font-size:13px;
+">
+<div style="text-align:center;">
+<strong>RMSE</strong><br>
+`r round(metricas_lineal$RMSE, 3)`
+</div>
+<div style="text-align:center;">
+<strong>MAE</strong><br>
+`r round(metricas_lineal$MAE, 3)`
+</div>
+</div>
+</div>
+
+<div style="
+background:white;
+border-radius:8px;
+border-top:5px solid #5B8FF9;
+padding:16px 18px;
+box-shadow:0 2px 7px rgba(0,0,0,0.08);
+min-height:140px;
+display:flex;
+flex-direction:column;
+align-items:center;
+justify-content:center;
+text-align:center;
+">
+<div style="
+font-size:16px;
+font-weight:700;
+color:#001B3E;
+margin-bottom:7px;
+">
+Random Forest
+</div>
+<div style="
+font-size:25px;
+font-weight:700;
+color:#5B8FF9;
+margin-bottom:10px;
+">
+R² = `r round(metricas_rf$R2, 3)`
+</div>
+<div style="
+display:flex;
+justify-content:center;
+gap:30px;
+width:100%;
+font-size:13px;
+">
+<div style="text-align:center;">
+<strong>RMSE</strong><br>
+`r round(metricas_rf$RMSE, 3)`
+</div>
+<div style="text-align:center;">
+<strong>MAE</strong><br>
+`r round(metricas_rf$MAE, 3)`
+</div>
+</div>
+</div>
+
+</div>
+
+
+
+Row
+-------------------------------------
+
+### Comparación del desempeño
+
+```{r grafica-comparacion-metricas-nueva, fig.height=4.1}
+comparacion_larga <- comparacion_modelos %>%
+  select(Modelo, RMSE, MAE, R2) %>%
+  pivot_longer(
+    cols = c(RMSE, MAE, R2),
+    names_to = "Metrica",
+    values_to = "Valor"
+  ) %>%
+  mutate(
+    Metrica = recode(
+      Metrica,
+      RMSE = "RMSE ↓",
+      MAE = "MAE ↓",
+      R2 = "R² ↑"
+    ),
+    Modelo = factor(
+      Modelo,
+      levels = c("Modelo base", "Regresión lineal", "Random Forest")
+    )
+  )
+
+p <- ggplot(
+  comparacion_larga,
+  aes(
+    x = Modelo,
+    y = Valor,
+    fill = Modelo,
+    text = paste0(Modelo, "<br>", Metrica, ": ", round(Valor, 3))
+  )
+) +
+  geom_col(width = 0.68) +
+  facet_wrap(~Metrica, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = c(
+    "Modelo base" = dorado_claro,
+    "Regresión lineal" = azul_unam,
+    "Random Forest" = azul_claro
+  )) +
+  labs(
+    title = "Desempeño sobre películas no utilizadas en entrenamiento",
+    subtitle = "RMSE y MAE: menor es mejor · R²: mayor es mejor · métricas sobre log10(ingresos)",
+    x = NULL,
+    y = NULL
+  ) +
+  tema_unam() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 16, hjust = 1)
+  )
+
+ggplotly(p, tooltip = "text")
+```
+
+Row
+-------------------------------------
+
+### Ingreso real vs. estimado por nivel de taquilla
+
+```{r grafica-ingresos-niveles, fig.height=4.8}
+p <- ggplot(
+  comparacion_taquilla,
+  aes(
+    x = nivel_taquilla,
+    y = Ingreso,
+    fill = Serie,
+    text = paste0(
+      "Nivel: ", nivel_taquilla,
+      "<br>", Serie,
+      "<br>Mediana: ", dollar(Ingreso, accuracy = 1)
+    )
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.78),
+    width = 0.68
+  ) +
+  geom_text(
+    aes(label = label_number(scale = 1e-6, suffix = "M", prefix = "$")(Ingreso)),
+    position = position_dodge(width = 0.78),
+    vjust = -0.35,
+    size = 3
+  ) +
+  scale_y_log10(
+    labels = label_number(scale = 1e-6, suffix = "M", prefix = "$")
+  ) +
+  scale_fill_manual(values = c(
+    "Ingreso real" = gris_texto,
+    "Regresión Lineal" = azul_unam,
+    "Random Forest" = azul_claro
+  )) +
+  labs(
+    title = "¿Cómo se comportan las predicciones a distintos niveles de taquilla?",
+    subtitle = "Mediana de ingresos reales y estimados por quintil del ingreso real · eje vertical en escala logarítmica",
+    x = "Nivel de taquilla real",
+    y = "Ingreso mediano",
+    fill = NULL
+  ) +
+  tema_unam()
+
+comparacion_taquilla <- comparacion_taquilla %>%
+  mutate(
+    Serie= factor(
+      Serie,
+    levels = c(
+      "Ingreso real",
+      "Regresión Lineal",
+      "Random Forest")
+  )
+)
+  
+
+ggplotly(p, tooltip = "text")
+```
+
+<div class="note-card-modelo"><strong>Cómo leerla.</strong> En cada nivel de taquilla, una barra estimada cercana a la barra de ingreso real indica una mejor aproximación. La vista por grupos evita la saturación del gráfico de dispersión y permite identificar con facilidad si los modelos tienden a subestimar o sobreestimar las películas de menor o mayor taquilla.</div>
+
+
+Interpretación {data-navmenu="Modelado"}
+=====================================
+
+Row {data-height=590}
+-------------------------------------
+
+### Regresión Lineal · Coeficientes
+
+<div class="note-card-modelo" style="margin-bottom:10px; border-left-color:#00366D;">
+Los coeficientes muestran la <strong>dirección de la asociación</strong> con <code>log_ingresos</code>, manteniendo constantes las demás variables. Como los predictores no están todos en la misma escala, la magnitud del coeficiente <strong>no debe interpretarse como una comparación directa de importancia predictiva</strong>.
+</div>
+
+```{r grafica-coeficientes-regresion-nueva, fig.height=4.6}
+p <- ggplot(
+  top_coef_dashboard,
+  aes(
+    x = coeficiente,
+    y = reorder(variable_limpia, magnitud),
+    fill = direccion,
+    text = paste0(
+      variable_limpia,
+      "<br>Coeficiente: ", round(coeficiente, 3),
+      "<br>p-value: ", signif(p_value, 3)
+    )
+  )
+) +
+  geom_col(width = 0.72) +
+  geom_vline(xintercept = 0, color = azul_oscuro, linewidth = 0.6) +
+  scale_fill_manual(values = c(
+    "Asociación positiva" = azul_unam,
+    "Asociación negativa" = dorado_unam
+  )) +
+  labs(
+    title = "Coeficientes significativos de mayor magnitud",
+    subtitle = "Regresión Lineal entrenada con todas las variables",
+    x = "Coeficiente",
+    y = NULL,
+    fill = NULL
+  ) +
+  tema_unam()
+
+ggplotly(p, tooltip = "text", height = 420)
+```
+
+Row {data-height=590}
+-------------------------------------
+
+### Random Forest · Importancia
+
+<div class="note-card-modelo" style="margin-bottom:10px; border-left-color:#5B8FF9;">
+Un <strong>%IncMSE alto</strong> indica que Random Forest depende más de esa variable para realizar sus predicciones. Esta medida representa <strong>importancia predictiva</strong>; no indica la dirección de la relación ni demuestra causalidad.
+</div>
+
+```{r grafica-importancia-rf-nueva, fig.height=4.6}
+p <- ggplot(
+  top_importancia_dashboard,
+  aes(
+    x = `%IncMSE`,
+    y = reorder(variable_limpia, `%IncMSE`),
+    text = paste0(
+      variable_limpia,
+      "<br>%IncMSE: ", round(`%IncMSE`, 1)
+    )
+  )
+) +
+  geom_col(fill = azul_claro, width = 0.75) +
+  labs(
+    title = "Variables con mayor importancia predictiva",
+    subtitle = "Random Forest · aumento del error al alterar la información de cada variable",
+    x = "Incremento porcentual del error (%IncMSE)",
+    y = NULL
+  ) +
+  tema_unam() +
+  theme(legend.position = "none")
+
+ggplotly(p, tooltip = "text", height = 420)
+```
+
+
+Rentabilidad {data-navmenu="Modelado"}
+=====================================
+
+Row
+-------------------------------------
+
+### De ingresos estimados a rentabilidad
+
+Las predicciones de **Random Forest** se transforman nuevamente a dólares mediante `10^x`. Con el ingreso estimado y el presupuesto se calcula el ROI predicho y se aplica el mismo umbral del análisis exploratorio: **ROI > 2.5**.
+
+<div style="display:flex; 
+  align-items:center; 
+  justify-content:center; 
+  gap:12px; margin:18px 0; 
+  flex-wrap:wrap; 
+  font-weight:600; 
+  color:#00366D;">
+  
+  <span style="padding:10px 14px; 
+    background:#F4F6F8; 
+    border-radius:6px;">Predicción log10
+  </span>
+  <span>→</span>
+  
+  <span style="padding:10px 14px; 
+    background:#F4F6F8; 
+    border-radius:6px;">Ingreso estimado
+  </span>
+  <span>→</span>
+  
+  <span style="padding:10px 14px; 
+    background:#F4F6F8; 
+    border-radius:6px;">ROI estimado
+  </span>
+  <span>→</span>
+  
+  <span style="padding:10px 14px; 
+    background:#F4F6F8; 
+    border-radius:6px;">Rentable / No rentable</span>
+</div>
+
+Row {data-height=125}
+-------------------------------------
+
+### Accuracy
+```{r rent-accuracy-nueva}
+valueBox(percent(accuracy, accuracy = 0.1), caption = "Clasificaciones correctas", icon = "fa-bullseye", color = azul_unam)
+```
+
+### Precision
+```{r rent-precision-nueva}
+valueBox(percent(precision, accuracy = 0.1), caption = "De lo predicho rentable, % correcto", icon = "fa-crosshairs", color = dorado_unam)
+```
+
+### Recall
+```{r rent-recall-nueva}
+valueBox(percent(recall, accuracy = 0.1), caption = "Rentables reales detectados", icon = "fa-search", color = azul_claro)
+```
+
+### F1
+```{r rent-f1-nueva}
+valueBox(percent(f1, accuracy = 0.1), caption = "Balance Precision / Recall", icon = "fa-balance-scale", color = dorado_claro)
+```
+
+Row {.tabset}
+-------------------------------------
+
+### Matriz de confusión
+
+```{r matriz-confusion-rentabilidad-nueva, fig.height=4.8}
+datos_matriz <- as.data.frame(matriz_rentabilidad)
+
+p <- ggplot(
+  datos_matriz,
+  aes(
+    x = Predicho,
+    y = Real,
+    fill = Freq,
+    text = paste0(
+      "Real: ", Real,
+      "<br>Predicho: ", Predicho,
+      "<br>Películas: ", Freq
+    )
+  )
+) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", fontface = "bold", size = 5) +
+  scale_fill_gradient(low = azul_claro, high = azul_oscuro) +
+  labs(
+    title = "Clasificación de rentabilidad",
+    subtitle = "Comparación entre la clasificación real y la derivada del ROI estimado",
+    x = "Clasificación predicha",
+    y = "Clasificación real"
+  ) +
+  tema_unam() +
+  theme(legend.position = "none")
+
+ggplotly(p, tooltip = "text")
+```
+
+### Distribución del ROI
+
+```{r distribucion-roi-nueva, fig.height=4.8}
+p <- ggplot(
+  tabla_rangos_dashboard,
+  aes(
+    x = rango,
+    y = cantidad,
+    fill = tipo,
+    text = paste0(tipo, "<br>Rango: ", rango, "<br>Películas: ", cantidad)
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.68
+  ) +
+  geom_text(
+    aes(label = cantidad),
+    position = position_dodge(width = 0.75),
+    vjust = -0.35,
+    size = 3.4
+  ) +
+  scale_fill_manual(values = c(
+    "ROI real" = azul_unam,
+    "ROI estimado" = dorado_unam
+  )) +
+  labs(
+    title = "Distribución del ROI real y estimado",
+    subtitle = "Comparación por rangos de retorno sobre la inversión",
+    x = "Rango de ROI",
+    y = "Número de películas",
+    fill = NULL
+  ) +
+  tema_unam()
+
+ggplotly(p, tooltip = "text")
+```
+
+### Casos individuales
+
+```{r ejemplos-predicciones-nueva, fig.height=5.0}
+p <- ggplot(
+  casos_ingresos_dashboard,
+  aes(
+    x = valor,
+    y = reorder(titulo, valor),
+    fill = tipo,
+    text = paste0(
+      titulo,
+      "<br>", tipo, ": ",
+      dollar(valor, accuracy = 1)
+    )
+  )
+) +
+  geom_col(position = "dodge") +
+  scale_x_log10(
+    labels = label_number(scale = 1e-6, suffix = "M", prefix = "$")
+  ) +
+  scale_fill_manual(values = c(
+    "Ingreso real" = azul_unam,
+    "Ingreso estimado" = dorado_unam
+  )) +
+  labs(
+    title = "Ejemplos de predicciones",
+    subtitle = "Cinco casos con menor error y cinco con mayor error en escala logarítmica",
+    x = "Ingresos",
+    y = NULL,
+    fill = NULL
+  ) +
+  tema_unam()
+
+ggplotly(p, tooltip = "text")
+```
+
+Row {data-height=180}
+-------------------------------------
+
+### Interpretación de la rentabilidad
+
+<div style="
+display:grid;
+grid-template-columns:repeat(2,1fr);
+gap:18px;
+margin-top:8px;
+">
+
+<div class="insight-card-modelo"
+     style="
+     border-top:4px solid #00366D;
+     text-align:center;
+     display:flex;
+     flex-direction:column;
+     justify-content:center;
+     min-height:115px;
+     ">
+
+  <div class="insight-title-modelo">
+    Clasificación global
+  </div>
+
+  <div class="insight-value-modelo">
+    `r percent(accuracy, accuracy = 0.1)`
+  </div>
+
+  <span style="font-size:13px;">
+    de las películas se clasifican correctamente como
+    rentables o no rentables.
+  </span>
+
+</div>
+
+
+<div class="insight-card-modelo"
+     style="
+     border-top:4px solid #5B8FF9;
+     text-align:center;
+     display:flex;
+     flex-direction:column;
+     justify-content:center;
+     min-height:115px;
+     ">
+
+  <div class="insight-title-modelo">
+    Detección de rentables
+  </div>
+
+  <div class="insight-value-modelo">
+    `r percent(recall, accuracy = 0.1)`
+  </div>
+
+  <span style="font-size:13px;">
+    de las películas realmente rentables son identificadas
+    correctamente por Random Forest.
+  </span>
+
+</div>
+
+</div>
+
+Conclusiones
+=====================================
+
+Row {data-height=255}
+-------------------------------------
+
+### Conclusiones
+
+<div style="display:grid; 
+  grid-template-columns:repeat(4,1fr); 
+  gap:14px; 
+  margin-top:6px;">
+
+<div class="insight-card-modelo" style="border-top:4px solid #00366D;">
+<div class="insight-title-modelo">La información sí aporta valor</div>
+
+<div class="insight-value-modelo" style="font-size:18px;">Mejor que el benchmark</div>
+<span style="font-size:12.5px;">Incorporar las características de las películas reduce el error frente a utilizar únicamente el ingreso promedio.</span>
+</div>
+
+<div class="insight-card-modelo" style="border-top:4px solid #5B8FF9;">
+<div class="insight-title-modelo">Mejor desempeño</div>
+<div class="insight-value-modelo" style="font-size:19px;">`r modelo_mejor$Modelo[1]`</div>
+<span style="font-size:12.5px;">R² = <strong>`r round(modelo_mejor$R2[1], 3)`</strong> en el conjunto de prueba.</span>
+</div>
+
+<div class="insight-card-modelo" style="border-top:4px solid #C69A2F;">
+<div class="insight-title-modelo">Valores Extremos</div>
+<div class="insight-value-modelo" style="font-size:18px;">`r principal_driver_rf`</div>
+<span style="font-size:12.5px;">El modelo genera estimaciones moderadas y tiene dificultades para reproducir los valores extremos.</span>
+</div>
+
+<div class="insight-card-modelo" style="border-top:4px solid #7A8CA5;">
+<div class="insight-title-modelo">Rentabilidad</div>
+<div class="insight-value-modelo" style="font-size:19px;">`r percent(accuracy, accuracy = 0.1)`</div>
+<span style="font-size:12.5px;">Películas correctamente clasificadas al aplicar el umbral ROI &gt; 2.5.</span>
+</div>
+
+</div>
+
+Row {data-height=145}
+-------------------------------------
+
+### R² del mejor modelo
+```{r conclusion-r2-ejecutiva}
+valueBox(
+  round(modelo_mejor$R2[1], 3),
+  caption = "Capacidad explicativa en TEST",
+  icon = "fa-line-chart",
+  color = azul_unam
+)
+```
+
+### Mejora vs. benchmark
+```{r conclusion-rmse-ejecutiva}
+valueBox(
+  percent(mejora_rmse_vs_base, accuracy = 0.1),
+  caption = "Reducción del RMSE",
+  icon = "fa-arrow-down",
+  color = azul_claro
+)
+```
+
+### Rentables detectadas
+```{r conclusion-recall-ejecutiva}
+valueBox(
+  percent(recall, accuracy = 0.1),
+  caption = "Recall de películas rentables",
+  icon = "fa-check-circle",
+  color = dorado_unam
+)
+```
+
+Row {data-height=360}
+-------------------------------------
+
+### Alcance y limitaciones
+
+<div style="display:grid; 
+  grid-template-columns:repeat(3,1fr); 
+  gap:14px; 
+  margin-top:5px;">
+
+<div class="note-card-modelo" style="border-left-color:#00366D;">
+
+<strong style="color:#00366D;">Predicción, no causalidad</strong><br><br>
+Los coeficientes y la importancia de variables permiten identificar asociaciones y capacidad predictiva, pero no demuestran que una característica cause mayores ingresos.
+</div>
+
+<div class="note-card-modelo" style="border-left-color:#C69A2F;">
+<strong style="color:#00366D;">Información posterior al estreno</strong><br><br>
+Popularidad, número de votos y calificación pueden modificarse después del lanzamiento. Por ello, el modelo no representa estrictamente una predicción preestreno.
+</div>
+
+<div class="note-card-modelo" style="border-left-color:#5B8FF9;">
+<strong style="color:#00366D;">Muestra dinámica</strong><br><br>
+La información proviene de la API de TMDB y puede cambiar entre extracciones. Para garantizar reproducibilidad conviene conservar una copia fija del dataset utilizado en el análisis final.
+</div>
+
+</div>
+
+<div style="margin-top:16px; 
+  padding:16px 22px; 
+  background:#001B3E; 
+  color:white; border-radius:8px; line-height:1.5;">
+<strong style="font-size:17px;">Conclusión general</strong><br><br>
+Las características disponibles de las películas contienen información útil para estimar su desempeño en taquilla y aproximar su rentabilidad. Los modelos mejoran frente a una estimación basada únicamente en el promedio, pero el desempeño comercial mantiene una variabilidad importante. Por ello, los resultados son más útiles para <strong>identificar patrones y comparar perfiles de películas</strong> que para interpretar la predicción como una garantía de éxito.
+</div>
+
+Bibliografía y Autores
+=====================================
+
+Row {data-height=150}
+-------------------------------------
+
+### <span style="color:white;">Equipo 4</span> {.no-padding}
+
+<div style="background: linear-gradient(100deg, var(--azul-oscuro) 0%, var(--azul-unam) 60%, var(--dorado-unam) 140%); 
+  border-radius: 6px; 
+  padding: 20px 26px;
+  color: white;">
+  
+<div style="font-size:1.3em; 
+  font-weight:700;">📚 Bibliografía y autores
+</div>
+
+<div style="opacity:.9; 
+  margin-top:4px;">Diplomado de Introducción Analítica a la Ciencia de Datos — Universidad Nacional Autónoma de México
+</div>
+</div>
+
+Row
+-------------------------------------
+
+### Integrantes del equipo
+
+```{r}
+integrantes <- tibble::tribble(
+  ~Integrante, ~N_cuenta,
+  "Argumedo Sandoval María Fernanda", "318276698",
+  "De la Cruz Salazar Norma Arely", "318221265",
+  "Fuentes Cacho Rodolfo", "317116418",
+  "Lugo Cruz Victor Manuel", "318584485",
+  "Mora Gutiérrez Karla Fernanda", "318223661",
+  "Sánchez Aguirre Luz Lorena", "318052140"
+)
+
+datatable(integrantes, rownames = FALSE, options = list(dom = "t", pageLength = 6), class = "stripe hover",
+          colnames = c("Integrante", "Número de cuenta"))
+```
+
+Row
+-------------------------------------
+
+### Fuente de datos
+
+- The Movie Database (TMDB). *TMDB API Documentation*. Recuperado de: https://developer.themoviedb.org/reference/getting-started
+- Este producto utiliza la API de TMDB pero no está respaldado ni certificado por TMDB.
+- Cazallas, J. (2024, 20 de julio).¿Cuánto necesita ganar una película para considerarse rentable en taquilla? HobbyConsolas. https://www.hobbyconsolas.com/reportajes/cuanto-necesita-ganar-pelicula-considerarse-rentable-1395415
+- Liaw, A., & Wiener, M. (2024). randomForest: Breiman and Cutler’s random forests for classification and regression (R package version 4.7-1.2). Comprehensive R Archive Network (CRAN)
+- Kuhn, M., & Wickham, H. (2026). Create traditional dummy variables. recipes. Tidymodels.
+
+### Paquetes de R utilizados
+
+- Wickham, H. et al. (2019). *Welcome to the tidyverse*. Journal of Open Source Software (tidyverse).
+- Iannone, R., Allaire, J.J., Borges, B. (flexdashboard).
+- Sievert, C. (2020). *Interactive Web-Based Data Visualization with R, plotly, and shiny* (plotly).
+- Xie, Y., Cheng, J., Tan, X. (DT: An R Interface to the DataTables Library).
+- Liaw, A. & Wiener, M. (2002). *Classification and Regression by randomForest*. R News.
+- Cheng, J., Schloerke, B., Karambelkar, B., Xie, Y. (crosstalk).
+
+Row
+-------------------------------------
+
+### Contexto académico
+
+Proyecto final elaborado para el **Módulo 8** del **Diplomado de Introducción Analítica a la Ciencia de Datos**, impartido en la **Universidad Nacional Autónoma de México (UNAM)**, `r format(Sys.Date(), '%Y')`. 
+
+El tema propuesto fue analizar los factores relacionados con la recepción y popularidad de las películas, utilizando datos obtenidos de la API pública de The Movie Database (TMDB).
